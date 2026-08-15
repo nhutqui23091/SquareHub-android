@@ -180,28 +180,44 @@ class ShareActivity : AppCompatActivity() {
         }
 
         if (remoteVideoUrl != null) {
-            val bytes = SquareApi.downloadBytes(remoteVideoUrl!!)
-                ?: return SquarePostResult(false, null, "Không tải được video từ bài viết")
+            val dl = SquareApi.downloadBytesDebug(
+                remoteVideoUrl!!,
+                accept = "video/mp4,video/*;q=0.9,*/*;q=0.1"
+            )
+            val bytes = dl.bytes
+                ?: return SquarePostResult(false, null, "Không tải được video từ bài viết (${dl.info})")
             return postVideoBytes(bytes, "tweet_video.mp4", apiKey)
         }
 
         if (localImageUris.isNotEmpty()) {
             val urls = mutableListOf<String>()
+            var lastError = ""
             for ((index, uri) in localImageUris.withIndex()) {
-                val bytes = readUriBytes(uri) ?: continue
-                SquareApi.uploadImageBytes(bytes, "share_image_$index.jpg", apiKey)?.let { urls.add(it) }
+                val bytes = readUriBytes(uri)
+                if (bytes == null) {
+                    lastError = "không đọc được file"
+                    continue
+                }
+                val uploaded = SquareApi.uploadImageBytes(bytes, "share_image_$index.jpg", apiKey)
+                if (uploaded != null) urls.add(uploaded) else lastError = "upload thất bại"
             }
-            if (urls.isEmpty()) return SquarePostResult(false, null, "Không tải ảnh lên được")
+            if (urls.isEmpty()) return SquarePostResult(false, null, "Không tải ảnh lên được ($lastError)")
             return SquareApi.postImages(sharedText, urls, apiKey)
         }
 
         if (remotePhotoUrls.isNotEmpty()) {
             val urls = mutableListOf<String>()
+            var lastError = ""
             for ((index, photoUrl) in remotePhotoUrls.withIndex()) {
-                val bytes = SquareApi.downloadBytes(photoUrl) ?: continue
-                SquareApi.uploadImageBytes(bytes, "tweet_image_$index.jpg", apiKey)?.let { urls.add(it) }
+                val dl = SquareApi.downloadBytesDebug(photoUrl, accept = "image/*")
+                if (dl.bytes == null) {
+                    lastError = dl.info
+                    continue
+                }
+                val uploaded = SquareApi.uploadImageBytes(dl.bytes, "tweet_image_$index.jpg", apiKey)
+                if (uploaded != null) urls.add(uploaded) else lastError = "upload lên Binance thất bại"
             }
-            if (urls.isEmpty()) return SquarePostResult(false, null, "Không tải được ảnh từ bài viết")
+            if (urls.isEmpty()) return SquarePostResult(false, null, "Không tải được ảnh từ bài viết ($lastError)")
             return SquareApi.postImages(sharedText, urls, apiKey)
         }
 

@@ -4,6 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
 import java.net.URLEncoder
 
@@ -22,10 +23,20 @@ data class TweetContent(
 
 // Endpoint/luồng gọi API lấy đúng theo source code chính thức của Binance
 // tại github.com/binance/binance-skills-hub (skills/binance/square-post).
+//
+// Việc tải ảnh/video từ X (pbs.twimg.com, video.twimg.com) trong file này được
+// viết lại để mô phỏng đúng cách Chrome extension "Square Hub" (đã xác nhận
+// chạy tốt, không lỗi) đang làm: dùng User-Agent trình duyệt máy tính, KHÔNG
+// gửi Referer giả (có thể bị chặn nếu không khớp phiên thật), Accept header
+// đúng loại media, và thử nhiều kiểu token khi lấy dữ liệu bài viết.
 object SquareApi {
 
     private const val ENDPOINT_V1 = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi"
     private const val ENDPOINT_V2 = "https://www.binance.com/bapi/composite/v2/public/pgc/openApi"
+
+    private const val DESKTOP_USER_AGENT =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
     // ---------- Đăng bài ----------
 
@@ -130,28 +141,18 @@ object SquareApi {
 
     // ---------- Lấy nội dung bài X từ link (khi Share Sheet chỉ đưa link) ----------
 
+    // Thử lần lượt nhiều kiểu token cho API syndication của X, giống đúng cách
+    // Chrome extension đang làm (extension thử không token, rồi token=x). Ưu
+    // tiên token tính toán trước (đã xác nhận lấy đúng text), sau đó thử các
+    // kiểu dự phòng để tăng khả năng lấy được ảnh/video.
     fun fetchTweetContent(tweetUrl: String): TweetContent? {
         val idMatch = Regex("status/(\\d+)").find(tweetUrl) ?: return null
         val tweetId = idMatch.groupValues[1]
-        val token = syndicationToken(tweetId)
 
-        return try {
-            val connection = URL(
-                "https://cdn.syndication.twimg.com/tweet-result?id=$tweetId&token=$token"
-            ).openConnection() as HttpURLConnection
+        val candidateTokens = listOf(syndicationToken(tweetId), null, "x")
 
-            connection.requestMethod = "GET"
-            connection.setRequestProperty(
-                "User-Agent",
-                "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36"
-            )
-            connection.connectTimeout = 10000
-            connection.readTimeout = 10000
-
-            if (connection.responseCode !in 200..299) return null
-
-            val responseText = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            val json = JSONObject(responseText)
+        for (token in candidateTokens) {
+            val json = fetchSyndicationJson(tweetId, token) ?: continue
 
             val text = json.optString("text", json.optString("full_text", ""))
 
@@ -159,7 +160,7 @@ object SquareApi {
             json.optJSONArray("photos")?.let { arr ->
                 for (i in 0 until arr.length()) {
                     val url = arr.optJSONObject(i)?.optString("url")
-                    if (!url.isNullOrBlank()) photos.add(url)
+                    if (!url.isNullOrBlank()) photos.add(applyOrigSize(url))
                 }
             }
 
@@ -168,7 +169,7 @@ object SquareApi {
 
             json.optJSONObject("video")?.let { video ->
                 val poster = video.optString("poster", "")
-                if (poster.isNotBlank()) videoPoster = poster
+                if (poster.isNotBlank()) videoPoster = applyOrigSize(poster)
 
                 var bestBitrate = -1
                 video.optJSONArray("variants")?.let { variants ->
@@ -186,14 +187,59 @@ object SquareApi {
                 }
             }
 
-            TweetContent(
+            // Nếu lần thử này không lấy được gì hữu ích thì thử token khác
+            // trước khi bỏ cuộc.
+            if (text.isBlank() && photos.isEmpty() && videoUrl.isNullOrBlank()) continue
+
+            return TweetContent(
                 text = text,
                 photoUrls = photos,
                 videoUrl = videoUrl,
                 videoPosterUrl = videoPoster
             )
+        }
+
+        return null
+    }
+
+    private fun fetchSyndicationJson(tweetId: String, token: String?): JSONObject? {
+        return try {
+            val base = "https://cdn.syndication.twimg.com/tweet-result?id=$tweetId"
+            val urlString = if (token.isNullOrEmpty()) base else "$base&token=$token"
+
+            val connection = URL(urlString).openConnection() as HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.setRequestProperty("User-Agent", DESKTOP_USER_AGENT)
+            connection.setRequestProperty("Accept", "application/json")
+            connection.connectTimeout = 10000
+            connection.readTimeout = 10000
+
+            if (connection.responseCode !in 200..299) return null
+
+            val responseText = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            JSONObject(responseText)
         } catch (e: Exception) {
             null
+        }
+    }
+
+    // Ép URL ảnh/poster của X về bản chất lượng gốc, giống hệt cách Chrome
+    // extension đang làm: u.searchParams.set('name', 'orig').
+    private fun applyOrigSize(url: String): String {
+        return try {
+            val u = URI(url)
+            val query = (u.query ?: "").split("&").filter { it.isNotBlank() }
+            val params = LinkedHashMap<String, String>()
+            for (pair in query) {
+                val idx = pair.indexOf('=')
+                if (idx == -1) continue
+                params[pair.substring(0, idx)] = pair.substring(idx + 1)
+            }
+            params["name"] = "orig"
+            val newQuery = params.entries.joinToString("&") { (k, v) -> "$k=$v" }
+            "${url.substringBefore("?")}?$newQuery"
+        } catch (e: Exception) {
+            url
         }
     }
 
@@ -205,10 +251,7 @@ object SquareApi {
         return try {
             val connection = URL(oembedUrlString).openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
-            connection.setRequestProperty(
-                "User-Agent",
-                "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36"
-            )
+            connection.setRequestProperty("User-Agent", DESKTOP_USER_AGENT)
             connection.connectTimeout = 10000
             connection.readTimeout = 10000
 
@@ -222,18 +265,38 @@ object SquareApi {
         }
     }
 
-    fun downloadBytes(urlString: String): ByteArray? {
+    data class DownloadResult(val bytes: ByteArray?, val info: String)
+
+    // Tải ảnh/video từ máy chủ của X (pbs.twimg.com, video.twimg.com...).
+    // Mô phỏng đúng theo cách Chrome extension đã chạy tốt: User-Agent trình
+    // duyệt máy tính thật, KHÔNG set Referer giả, Accept header đúng loại media.
+    fun downloadBytesDebug(urlString: String, accept: String = "*/*"): DownloadResult {
         return try {
             val connection = URL(urlString).openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
+            connection.setRequestProperty("User-Agent", DESKTOP_USER_AGENT)
+            connection.setRequestProperty("Accept", accept)
+            connection.instanceFollowRedirects = true
             connection.connectTimeout = 20000
             connection.readTimeout = 30000
-            if (connection.responseCode !in 200..299) return null
-            connection.inputStream.use { it.readBytes() }
+
+            val code = connection.responseCode
+            if (code !in 200..299) {
+                return DownloadResult(null, "HTTP $code")
+            }
+
+            val bytes = connection.inputStream.use { it.readBytes() }
+            if (bytes.isEmpty()) {
+                return DownloadResult(null, "0 bytes")
+            }
+
+            DownloadResult(bytes, "OK (${bytes.size} bytes)")
         } catch (e: Exception) {
-            null
+            DownloadResult(null, e.message ?: e.javaClass.simpleName)
         }
     }
+
+    fun downloadBytes(urlString: String): ByteArray? = downloadBytesDebug(urlString).bytes
 
     // ---------- Helpers ----------
 
