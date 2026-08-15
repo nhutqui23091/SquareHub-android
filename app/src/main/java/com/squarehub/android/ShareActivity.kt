@@ -7,10 +7,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
-import android.view.View
-import android.widget.Button
-import android.widget.ProgressBar
-import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import kotlinx.coroutines.CoroutineScope
@@ -21,47 +17,27 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.regex.Pattern
 
+// Không hiện khung xem trước nữa - bấm chia sẻ là tự động đăng luôn,
+// chỉ báo kết quả bằng 1 dòng thông báo nhỏ (Toast) rồi tự đóng lại.
 class ShareActivity : AppCompatActivity() {
 
     private var sharedText: String = ""
     private var sharedUrl: String? = null
 
-    // Ảnh/video lấy trực tiếp từ intent chia sẻ (nếu app nguồn đính kèm sẵn)
     private var localImageUris: MutableList<Uri> = mutableListOf()
     private var localVideoUri: Uri? = null
 
-    // Ảnh/video lấy được bằng cách tự tải nội dung bài viết từ link (khi
-    // app nguồn chỉ đưa link, không đính kèm file - trường hợp phổ biến của X)
     private var remotePhotoUrls: List<String> = emptyList()
     private var remoteVideoUrl: String? = null
-
-    private lateinit var previewText: TextView
-    private lateinit var postButton: Button
-    private lateinit var cancelButton: Button
-    private lateinit var progressBar: ProgressBar
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         try {
-            setContentView(R.layout.activity_share)
-
-            previewText = findViewById(R.id.previewText)
-            postButton = findViewById(R.id.postButton)
-            cancelButton = findViewById(R.id.cancelButton)
-            progressBar = findViewById(R.id.progressBar)
-
-            cancelButton.setOnClickListener { finish() }
-            postButton.setOnClickListener { post() }
-
             handleIncomingIntent()
         } catch (e: Exception) {
             Log.e("SquareHub", "onCreate failed", e)
-            Toast.makeText(
-                this,
-                "Lỗi: ${e.message ?: e.javaClass.simpleName}",
-                Toast.LENGTH_LONG
-            ).show()
+            toast("Lỗi: ${e.message ?: e.javaClass.simpleName}")
             finish()
         }
     }
@@ -69,15 +45,13 @@ class ShareActivity : AppCompatActivity() {
     // ---------- Nhận nội dung được chia sẻ ----------
 
     private fun handleIncomingIntent() {
-        try {
-            when (intent.action) {
-                Intent.ACTION_SEND -> handleSingleSend()
-                Intent.ACTION_SEND_MULTIPLE -> handleMultipleSend()
-                else -> previewText.text = "Không có nội dung để đăng."
+        when (intent.action) {
+            Intent.ACTION_SEND -> handleSingleSend()
+            Intent.ACTION_SEND_MULTIPLE -> handleMultipleSend()
+            else -> {
+                toast("Không có nội dung để đăng.")
+                finish()
             }
-        } catch (e: Exception) {
-            Log.e("SquareHub", "handleIncomingIntent failed", e)
-            previewText.text = "❌ Lỗi khi đọc nội dung chia sẻ: ${e.message ?: e.javaClass.simpleName}"
         }
     }
 
@@ -89,14 +63,14 @@ class ShareActivity : AppCompatActivity() {
         if (streamUri != null && type.startsWith("image/")) {
             localImageUris = mutableListOf(streamUri)
             sharedText = text
-            refreshLocalMediaPreview()
+            startPosting()
             return
         }
 
         if (streamUri != null && type.startsWith("video/")) {
             localVideoUri = streamUri
             sharedText = text
-            refreshLocalMediaPreview()
+            startPosting()
             return
         }
 
@@ -115,9 +89,9 @@ class ShareActivity : AppCompatActivity() {
         } == true
 
         if (isOnlyUrl && isXLink) {
-            fetchAndShowTweetContent(sharedUrl!!)
+            fetchTweetThenPost(sharedUrl!!)
         } else {
-            previewText.text = sharedText.ifBlank { "Không có nội dung để đăng." }
+            startPosting()
         }
     }
 
@@ -125,21 +99,13 @@ class ShareActivity : AppCompatActivity() {
         val uris = getStreamUriList(intent) ?: arrayListOf()
         localImageUris = uris.take(4).toMutableList()
         sharedText = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
-        refreshLocalMediaPreview()
+        startPosting()
     }
 
-    private fun refreshLocalMediaPreview() {
-        val parts = mutableListOf<String>()
-
-        if (sharedText.isNotBlank()) parts.add(sharedText)
-        if (localImageUris.isNotEmpty()) parts.add("🖼️ ${localImageUris.size} ảnh đính kèm")
-        if (localVideoUri != null) parts.add("🎥 Video đính kèm")
-
-        previewText.text = if (parts.isEmpty()) "Không có nội dung để đăng." else parts.joinToString("\n")
-    }
-
-    private fun fetchAndShowTweetContent(url: String) {
-        previewText.text = "Đang lấy nội dung bài viết..."
+    // Lấy nội dung thật (text/ảnh/video) từ link bài viết X - không giữ
+    // lại link gốc trong nội dung đăng, chỉ lấy đúng text/ảnh/video.
+    private fun fetchTweetThenPost(url: String) {
+        toast("Đang lấy nội dung bài viết...")
 
         CoroutineScope(Dispatchers.Main).launch {
             try {
@@ -147,45 +113,49 @@ class ShareActivity : AppCompatActivity() {
 
                 if (content == null) {
                     val tweetText = withContext(Dispatchers.IO) { SquareApi.fetchTweetText(url) }
-                    sharedText = if (!tweetText.isNullOrBlank()) "$tweetText\n\n$url" else url
-                    previewText.text = sharedText
-                    return@launch
-                }
+                    sharedText = tweetText ?: ""
+                } else {
+                    sharedText = content.text
 
-                sharedText = if (content.text.isNotBlank()) "${content.text}\n\n$url" else url
-
-                when {
-                    content.videoUrl != null -> {
+                    if (content.videoUrl != null) {
                         remoteVideoUrl = content.videoUrl
-                        previewText.text = "$sharedText\n\n🎥 Video đính kèm"
-                    }
-                    content.photoUrls.isNotEmpty() -> {
+                    } else if (content.photoUrls.isNotEmpty()) {
                         remotePhotoUrls = content.photoUrls.take(4)
-                        previewText.text = "$sharedText\n\n🖼️ ${remotePhotoUrls.size} ảnh đính kèm"
                     }
-                    else -> previewText.text = sharedText
                 }
             } catch (e: Exception) {
-                Log.e("SquareHub", "fetchAndShowTweetContent failed", e)
-                sharedText = url
-                previewText.text = "⚠️ Không lấy được nội dung bài viết (${e.message ?: e.javaClass.simpleName}), sẽ đăng link gốc.\n\n$url"
+                Log.e("SquareHub", "fetchTweetThenPost failed", e)
             }
+
+            startPosting()
         }
     }
 
     // ---------- Đăng bài ----------
 
-    private fun post() {
+    private fun startPosting() {
         val prefs = getSharedPreferences(Config.PREFS_NAME, MODE_PRIVATE)
         val apiKey = prefs.getString(Config.API_KEY_PREF, "") ?: ""
 
         if (apiKey.isBlank()) {
-            previewText.text = "⚠️ Chưa có API key. Mở app SquareHub để lưu key."
+            toast("⚠️ Chưa có API key. Mở app SquareHub để lưu key.")
+            finish()
             return
         }
 
-        postButton.isEnabled = false
-        progressBar.visibility = View.VISIBLE
+        val hasAnyContent = sharedText.isNotBlank() ||
+            localImageUris.isNotEmpty() ||
+            localVideoUri != null ||
+            remotePhotoUrls.isNotEmpty() ||
+            remoteVideoUrl != null
+
+        if (!hasAnyContent) {
+            toast("Không có nội dung để đăng.")
+            finish()
+            return
+        }
+
+        toast("Đang đăng lên Square...")
 
         CoroutineScope(Dispatchers.Main).launch {
             val result = try {
@@ -195,18 +165,8 @@ class ShareActivity : AppCompatActivity() {
                 SquarePostResult(false, null, "Lỗi: ${e.message ?: e.javaClass.simpleName}")
             }
 
-            progressBar.visibility = View.GONE
-            postButton.isEnabled = true
-
-            previewText.text = if (result.success) {
-                "✅ ${result.message}\nID: ${result.postId ?: "unavailable"}"
-            } else {
-                "❌ ${result.message}"
-            }
-
-            if (result.success) {
-                previewText.postDelayed({ finish() }, 1200)
-            }
+            toast(if (result.success) "✅ ${result.message}" else "❌ ${result.message}")
+            finish()
         }
     }
 
@@ -302,6 +262,10 @@ class ShareActivity : AppCompatActivity() {
         } catch (e: Exception) {
             null
         }
+    }
+
+    private fun toast(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     }
 
     // ---------- Helpers tương thích API cũ/mới ----------
