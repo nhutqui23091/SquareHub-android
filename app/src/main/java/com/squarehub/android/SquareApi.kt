@@ -86,7 +86,12 @@ object SquareApi {
 
     // ---------- Upload ảnh ----------
 
-    fun uploadImageBytes(bytes: ByteArray, fileName: String, apiKey: String): String? {
+    fun uploadImageBytes(
+        bytes: ByteArray,
+        fileName: String,
+        apiKey: String,
+        contentType: String? = null
+    ): String? {
         return try {
             val presignBody = JSONObject().apply { put("imageName", fileName) }
             val presignResp = postJson("$ENDPOINT_V2/image/presignedUrl", presignBody, apiKey)
@@ -96,7 +101,12 @@ object SquareApi {
             val fileTicket = presignResp.optString("fileTicket", "")
             if (presignedUrl.isBlank() || fileTicket.isBlank()) return null
 
-            if (!putBytes(presignedUrl, bytes, contentTypeForFileName(fileName))) return null
+            // Content-Type khi PUT lên phải khớp với đuôi file đã báo lúc xin
+            // presigned URL, nếu không S3 sẽ từ chối upload (đây là nguyên
+            // nhân gây lỗi "upload lên Binance thất bại" khi ảnh tải về thực
+            // ra là PNG/WEBP nhưng bị đặt tên .jpg).
+            val effectiveContentType = contentType ?: contentTypeForFileName(fileName)
+            if (!putBytes(presignedUrl, bytes, effectiveContentType)) return null
 
             var imageUrl: String? = null
             for (attempt in 1..10) {
@@ -118,7 +128,12 @@ object SquareApi {
 
     // ---------- Upload video ----------
 
-    fun uploadVideoBytes(bytes: ByteArray, fileName: String, apiKey: String): String? {
+    fun uploadVideoBytes(
+        bytes: ByteArray,
+        fileName: String,
+        apiKey: String,
+        contentType: String? = null
+    ): String? {
         return try {
             val presignBody = JSONObject().apply {
                 put("fileName", fileName)
@@ -131,7 +146,8 @@ object SquareApi {
             val fileTicket = presignResp.optString("fileTicket", "")
             if (presignedUrl.isBlank() || fileTicket.isBlank()) return null
 
-            if (!putBytes(presignedUrl, bytes, contentTypeForFileName(fileName))) return null
+            val effectiveContentType = contentType ?: contentTypeForFileName(fileName)
+            if (!putBytes(presignedUrl, bytes, effectiveContentType)) return null
 
             fileTicket
         } catch (e: Exception) {
@@ -265,11 +281,13 @@ object SquareApi {
         }
     }
 
-    data class DownloadResult(val bytes: ByteArray?, val info: String)
+    data class DownloadResult(val bytes: ByteArray?, val info: String, val contentType: String? = null)
 
     // Tải ảnh/video từ máy chủ của X (pbs.twimg.com, video.twimg.com...).
     // Mô phỏng đúng theo cách Chrome extension đã chạy tốt: User-Agent trình
     // duyệt máy tính thật, KHÔNG set Referer giả, Accept header đúng loại media.
+    // Đồng thời đọc luôn Content-Type thật từ response, để khi upload lên
+    // Binance dùng đúng định dạng (tránh lệch định dạng gây upload thất bại).
     fun downloadBytesDebug(urlString: String, accept: String = "*/*"): DownloadResult {
         return try {
             val connection = URL(urlString).openConnection() as HttpURLConnection
@@ -285,18 +303,54 @@ object SquareApi {
                 return DownloadResult(null, "HTTP $code")
             }
 
+            val rawContentType = connection.contentType?.substringBefore(";")?.trim()?.lowercase()
+
             val bytes = connection.inputStream.use { it.readBytes() }
             if (bytes.isEmpty()) {
                 return DownloadResult(null, "0 bytes")
             }
 
-            DownloadResult(bytes, "OK (${bytes.size} bytes)")
+            DownloadResult(bytes, "OK (${bytes.size} bytes)", rawContentType)
         } catch (e: Exception) {
             DownloadResult(null, e.message ?: e.javaClass.simpleName)
         }
     }
 
     fun downloadBytes(urlString: String): ByteArray? = downloadBytesDebug(urlString).bytes
+
+    // Chuẩn hoá Content-Type ảnh về 1 trong các loại Binance/S3 chấp nhận,
+    // dự phòng bằng phần đuôi/format trong chính URL khi server không trả
+    // Content-Type rõ ràng.
+    fun normalizeImageContentType(contentType: String?, url: String): String {
+        val known = setOf("image/jpeg", "image/png", "image/gif", "image/webp")
+        if (contentType != null && known.contains(contentType)) return contentType
+
+        val lowerUrl = url.substringBefore("?").lowercase()
+        return when {
+            lowerUrl.endsWith(".png") -> "image/png"
+            lowerUrl.endsWith(".gif") -> "image/gif"
+            lowerUrl.endsWith(".webp") -> "image/webp"
+            else -> "image/jpeg"
+        }
+    }
+
+    fun extensionForImageContentType(contentType: String): String {
+        return when (contentType) {
+            "image/png" -> "png"
+            "image/gif" -> "gif"
+            "image/webp" -> "webp"
+            else -> "jpg"
+        }
+    }
+
+    // Video từ X thường là mp4, nhưng đôi khi (vd GIF động dạng video) là webm.
+    fun normalizeVideoContentType(contentType: String?): String {
+        return if (contentType == "video/webm") "video/webm" else "video/mp4"
+    }
+
+    fun extensionForVideoContentType(contentType: String): String {
+        return if (contentType == "video/webm") "webm" else "mp4"
+    }
 
     // ---------- Helpers ----------
 

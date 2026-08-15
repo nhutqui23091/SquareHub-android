@@ -186,7 +186,11 @@ class ShareActivity : AppCompatActivity() {
             )
             val bytes = dl.bytes
                 ?: return SquarePostResult(false, null, "Không tải được video từ bài viết (${dl.info})")
-            return postVideoBytes(bytes, "tweet_video.mp4", apiKey)
+            // Dùng đúng Content-Type thật (mp4/webm) lấy từ response, tránh
+            // lệch định dạng khi upload lên Binance.
+            val videoContentType = SquareApi.normalizeVideoContentType(dl.contentType)
+            val videoExt = SquareApi.extensionForVideoContentType(videoContentType)
+            return postVideoBytes(bytes, "tweet_video.$videoExt", apiKey, videoContentType)
         }
 
         if (localImageUris.isNotEmpty()) {
@@ -214,7 +218,17 @@ class ShareActivity : AppCompatActivity() {
                     lastError = dl.info
                     continue
                 }
-                val uploaded = SquareApi.uploadImageBytes(dl.bytes, "tweet_image_$index.jpg", apiKey)
+                // Dùng đúng Content-Type thật (jpeg/png/webp/gif) lấy từ
+                // response, tránh lệch định dạng khiến upload lên Binance
+                // (presigned S3 URL) bị từ chối.
+                val imageContentType = SquareApi.normalizeImageContentType(dl.contentType, photoUrl)
+                val imageExt = SquareApi.extensionForImageContentType(imageContentType)
+                val uploaded = SquareApi.uploadImageBytes(
+                    dl.bytes,
+                    "tweet_image_$index.$imageExt",
+                    apiKey,
+                    imageContentType
+                )
                 if (uploaded != null) urls.add(uploaded) else lastError = "upload lên Binance thất bại"
             }
             if (urls.isEmpty()) return SquarePostResult(false, null, "Không tải được ảnh từ bài viết ($lastError)")
@@ -228,8 +242,13 @@ class ShareActivity : AppCompatActivity() {
         return SquareApi.postText(sharedText, apiKey)
     }
 
-    private fun postVideoBytes(bytes: ByteArray, fileName: String, apiKey: String): SquarePostResult {
-        val fileTicket = SquareApi.uploadVideoBytes(bytes, fileName, apiKey)
+    private fun postVideoBytes(
+        bytes: ByteArray,
+        fileName: String,
+        apiKey: String,
+        contentType: String? = null
+    ): SquarePostResult {
+        val fileTicket = SquareApi.uploadVideoBytes(bytes, fileName, apiKey, contentType)
             ?: return SquarePostResult(false, null, "Không tải video lên được")
 
         val info = extractVideoInfo(bytes)
