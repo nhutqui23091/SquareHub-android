@@ -1,0 +1,30 @@
+package com.squarehub.android
+
+import android.os.Bundle
+import android.widget.Button
+import android.widget.EditText
+import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+
+class MainActivity : AppCompatActivity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        val apiKeyField = findViewById<EditText>(R.id.apiKeyField)
+        val saveButton = findViewById<Button>(R.id.saveButton)
+        val statusText = findViewById<TextView>(R.id.statusText)
+
+        val prefs = getSharedPreferences(Config.PREFS_NAME, MODE_PRIVATE)
+        apiKeyField.setText(prefs.getString(Config.API_KEY_PREF, ""))
+
+        saveButton.setOnClickListener {
+            val key = apiKeyField.text.toString().trim()
+            prefs.edit().putString(Config.API_KEY_PREF, key).apply()
+            statusText.text = "Đã lưu"
+            Toast.makeText(this, "Đã lưu API key", Toast.LENGTH_SHORT).show()
+        }
+    }
+}
