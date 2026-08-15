@@ -103,10 +103,17 @@ object SquareApi {
             val presignResp = presign.json
                 ?: return UploadResult(null, "xin presigned URL thất bại (${presign.info})")
 
-            val presignedUrl = presignResp.optString("presignedUrl", "")
-            val fileTicket = presignResp.optString("fileTicket", "")
+            apiErrorMessage(presignResp)?.let { return UploadResult(null, it) }
+
+            // QUAN TRỌNG: Binance luôn bọc dữ liệu thật trong field "data"
+            // (vd {code, message, data:{presignedUrl, fileTicket}}), không
+            // nằm trực tiếp ở cấp ngoài cùng. Đây là nguyên nhân gốc khiến
+            // upload ảnh luôn thất bại từ trước đến giờ dù tải ảnh về đã ổn.
+            val presignData = presignResp.optJSONObject("data") ?: presignResp
+            val presignedUrl = presignData.optString("presignedUrl", "")
+            val fileTicket = presignData.optString("fileTicket", "")
             if (presignedUrl.isBlank() || fileTicket.isBlank()) {
-                return UploadResult(null, "Binance không trả về presigned URL cho ảnh")
+                return UploadResult(null, "Binance không trả về presigned URL cho ảnh (phản hồi: ${presignResp.toString().take(200)})")
             }
 
             // Content-Type khi PUT lên phải khớp với đuôi file đã báo lúc xin
@@ -124,15 +131,20 @@ object SquareApi {
                 val status = postJsonDebug("$ENDPOINT_V2/image/imageStatus", statusBody, apiKey)
                 val statusResp = status.json
                 lastStatusInfo = status.info
-                val url = statusResp?.optString("imageUrl", "")
-                val statusCode = statusResp?.optInt("status", -1) ?: -1
-                if (!url.isNullOrBlank()) {
-                    imageUrl = url
-                    break
-                }
-                if (statusCode == 2) {
-                    val reason = statusResp?.optString("failedReason", "")
-                    return UploadResult(null, "Binance xử lý ảnh thất bại${if (!reason.isNullOrBlank()) ": $reason" else ""}")
+
+                if (statusResp != null) {
+                    apiErrorMessage(statusResp)?.let { return UploadResult(null, it) }
+                    val statusData = statusResp.optJSONObject("data") ?: statusResp
+                    val url = statusData.optString("imageUrl", "")
+                    val statusCode = statusData.optInt("status", -1)
+                    if (!url.isNullOrBlank()) {
+                        imageUrl = url
+                        break
+                    }
+                    if (statusCode == 2) {
+                        val reason = statusData.optString("failedReason", "")
+                        return UploadResult(null, "Binance xử lý ảnh thất bại${if (reason.isNotBlank()) ": $reason" else ""}")
+                    }
                 }
                 Thread.sleep(1000)
             }
@@ -164,10 +176,13 @@ object SquareApi {
             val presignResp = presign.json
                 ?: return UploadResult(null, "xin presigned URL thất bại (${presign.info})")
 
-            val presignedUrl = presignResp.optString("presignedUrl", "")
-            val fileTicket = presignResp.optString("fileTicket", "")
+            apiErrorMessage(presignResp)?.let { return UploadResult(null, it) }
+
+            val presignData = presignResp.optJSONObject("data") ?: presignResp
+            val presignedUrl = presignData.optString("presignedUrl", "")
+            val fileTicket = presignData.optString("fileTicket", "")
             if (presignedUrl.isBlank() || fileTicket.isBlank()) {
-                return UploadResult(null, "Binance không trả về presigned URL cho video")
+                return UploadResult(null, "Binance không trả về presigned URL cho video (phản hồi: ${presignResp.toString().take(200)})")
             }
 
             val effectiveContentType = contentType ?: contentTypeForFileName(fileName)
@@ -180,6 +195,15 @@ object SquareApi {
         } catch (e: Exception) {
             UploadResult(null, e.message ?: e.javaClass.simpleName)
         }
+    }
+
+    // Nếu Binance trả về code lỗi kèm message (ngay cả khi HTTP status là 200),
+    // lấy ra thông báo lỗi thật thay vì để chỗ gọi tự đoán chung chung.
+    private fun apiErrorMessage(resp: JSONObject): String? {
+        val code = resp.optString("code", "")
+        if (code.isBlank() || code == "000000") return null
+        val message = resp.optString("message", "")
+        return if (message.isNotBlank()) "Binance lỗi ($code): $message" else "Binance lỗi mã $code"
     }
 
     // ---------- Lấy nội dung bài X từ link (khi Share Sheet chỉ đưa link) ----------
