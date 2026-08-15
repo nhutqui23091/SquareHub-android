@@ -203,7 +203,7 @@ class ShareActivity : AppCompatActivity() {
                     continue
                 }
                 val uploaded = SquareApi.uploadImageBytes(bytes, "share_image_$index.jpg", apiKey)
-                if (uploaded != null) urls.add(uploaded) else lastError = "upload thất bại"
+                if (uploaded.value != null) urls.add(uploaded.value) else lastError = uploaded.error ?: "upload thất bại"
             }
             if (urls.isEmpty()) return SquarePostResult(false, null, "Không tải ảnh lên được ($lastError)")
             return SquareApi.postImages(sharedText, urls, apiKey)
@@ -229,7 +229,7 @@ class ShareActivity : AppCompatActivity() {
                     apiKey,
                     imageContentType
                 )
-                if (uploaded != null) urls.add(uploaded) else lastError = "upload lên Binance thất bại"
+                if (uploaded.value != null) urls.add(uploaded.value) else lastError = uploaded.error ?: "upload lên Binance thất bại"
             }
             if (urls.isEmpty()) return SquarePostResult(false, null, "Không tải được ảnh từ bài viết ($lastError)")
             return SquareApi.postImages(sharedText, urls, apiKey)
@@ -248,8 +248,9 @@ class ShareActivity : AppCompatActivity() {
         apiKey: String,
         contentType: String? = null
     ): SquarePostResult {
-        val fileTicket = SquareApi.uploadVideoBytes(bytes, fileName, apiKey, contentType)
-            ?: return SquarePostResult(false, null, "Không tải video lên được")
+        val videoUpload = SquareApi.uploadVideoBytes(bytes, fileName, apiKey, contentType)
+        val fileTicket = videoUpload.value
+            ?: return SquarePostResult(false, null, "Không tải video lên được (${videoUpload.error})")
 
         val info = extractVideoInfo(bytes)
         val bitmap = info.coverBitmap
@@ -258,8 +259,9 @@ class ShareActivity : AppCompatActivity() {
         val output = ByteArrayOutputStream()
         bitmap.compress(Bitmap.CompressFormat.JPEG, 85, output)
 
-        val coverUrl = SquareApi.uploadImageBytes(output.toByteArray(), "video_cover.jpg", apiKey)
-            ?: return SquarePostResult(false, null, "Không tải được ảnh bìa video")
+        val coverUpload = SquareApi.uploadImageBytes(output.toByteArray(), "video_cover.jpg", apiKey)
+        val coverUrl = coverUpload.value
+            ?: return SquarePostResult(false, null, "Không tải được ảnh bìa video (${coverUpload.error})")
 
         return SquareApi.postVideo(sharedText, fileTicket, coverUrl, info.durationSeconds, apiKey)
     }

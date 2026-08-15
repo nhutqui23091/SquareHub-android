@@ -84,6 +84,11 @@ object SquareApi {
         }
     }
 
+    // Kết quả upload có kèm lý do lỗi cụ thể (mã HTTP + nội dung lỗi trả về từ
+    // Binance/S3), để hiện lên Toast cho người dùng thấy chính xác chỗ nào
+    // đang bị chặn, thay vì chỉ biết chung chung là "thất bại".
+    data class UploadResult(val value: String?, val error: String?)
+
     // ---------- Upload ảnh ----------
 
     fun uploadImageBytes(
@@ -91,38 +96,54 @@ object SquareApi {
         fileName: String,
         apiKey: String,
         contentType: String? = null
-    ): String? {
+    ): UploadResult {
         return try {
             val presignBody = JSONObject().apply { put("imageName", fileName) }
-            val presignResp = postJson("$ENDPOINT_V2/image/presignedUrl", presignBody, apiKey)
-                ?: return null
+            val presign = postJsonDebug("$ENDPOINT_V2/image/presignedUrl", presignBody, apiKey)
+            val presignResp = presign.json
+                ?: return UploadResult(null, "xin presigned URL thất bại (${presign.info})")
 
             val presignedUrl = presignResp.optString("presignedUrl", "")
             val fileTicket = presignResp.optString("fileTicket", "")
-            if (presignedUrl.isBlank() || fileTicket.isBlank()) return null
+            if (presignedUrl.isBlank() || fileTicket.isBlank()) {
+                return UploadResult(null, "Binance không trả về presigned URL cho ảnh")
+            }
 
             // Content-Type khi PUT lên phải khớp với đuôi file đã báo lúc xin
-            // presigned URL, nếu không S3 sẽ từ chối upload (đây là nguyên
-            // nhân gây lỗi "upload lên Binance thất bại" khi ảnh tải về thực
-            // ra là PNG/WEBP nhưng bị đặt tên .jpg).
+            // presigned URL, nếu không S3 sẽ từ chối upload.
             val effectiveContentType = contentType ?: contentTypeForFileName(fileName)
-            if (!putBytes(presignedUrl, bytes, effectiveContentType)) return null
+            val put = putBytesDebug(presignedUrl, bytes, effectiveContentType)
+            if (!put.success) {
+                return UploadResult(null, "upload ảnh lên S3 thất bại (${put.info})")
+            }
 
             var imageUrl: String? = null
+            var lastStatusInfo = ""
             for (attempt in 1..10) {
                 val statusBody = JSONObject().apply { put("fileTicket", fileTicket) }
-                val statusResp = postJson("$ENDPOINT_V2/image/imageStatus", statusBody, apiKey)
+                val status = postJsonDebug("$ENDPOINT_V2/image/imageStatus", statusBody, apiKey)
+                val statusResp = status.json
+                lastStatusInfo = status.info
                 val url = statusResp?.optString("imageUrl", "")
+                val statusCode = statusResp?.optInt("status", -1) ?: -1
                 if (!url.isNullOrBlank()) {
                     imageUrl = url
                     break
                 }
+                if (statusCode == 2) {
+                    val reason = statusResp?.optString("failedReason", "")
+                    return UploadResult(null, "Binance xử lý ảnh thất bại${if (!reason.isNullOrBlank()) ": $reason" else ""}")
+                }
                 Thread.sleep(1000)
             }
 
-            imageUrl
+            if (imageUrl == null) {
+                return UploadResult(null, "Binance xử lý ảnh quá lâu, timeout ($lastStatusInfo)")
+            }
+
+            UploadResult(imageUrl, null)
         } catch (e: Exception) {
-            null
+            UploadResult(null, e.message ?: e.javaClass.simpleName)
         }
     }
 
@@ -133,25 +154,31 @@ object SquareApi {
         fileName: String,
         apiKey: String,
         contentType: String? = null
-    ): String? {
+    ): UploadResult {
         return try {
             val presignBody = JSONObject().apply {
                 put("fileName", fileName)
                 put("size", bytes.size)
             }
-            val presignResp = postJson("$ENDPOINT_V2/video/preSign", presignBody, apiKey)
-                ?: return null
+            val presign = postJsonDebug("$ENDPOINT_V2/video/preSign", presignBody, apiKey)
+            val presignResp = presign.json
+                ?: return UploadResult(null, "xin presigned URL thất bại (${presign.info})")
 
             val presignedUrl = presignResp.optString("presignedUrl", "")
             val fileTicket = presignResp.optString("fileTicket", "")
-            if (presignedUrl.isBlank() || fileTicket.isBlank()) return null
+            if (presignedUrl.isBlank() || fileTicket.isBlank()) {
+                return UploadResult(null, "Binance không trả về presigned URL cho video")
+            }
 
             val effectiveContentType = contentType ?: contentTypeForFileName(fileName)
-            if (!putBytes(presignedUrl, bytes, effectiveContentType)) return null
+            val put = putBytesDebug(presignedUrl, bytes, effectiveContentType)
+            if (!put.success) {
+                return UploadResult(null, "upload video lên S3 thất bại (${put.info})")
+            }
 
-            fileTicket
+            UploadResult(fileTicket, null)
         } catch (e: Exception) {
-            null
+            UploadResult(null, e.message ?: e.javaClass.simpleName)
         }
     }
 
@@ -355,6 +382,14 @@ object SquareApi {
     // ---------- Helpers ----------
 
     private fun postJson(urlString: String, body: JSONObject, apiKey: String): JSONObject? {
+        return postJsonDebug(urlString, body, apiKey).json
+    }
+
+    private data class JsonDebugResult(val json: JSONObject?, val info: String)
+
+    // Giống postJson nhưng luôn trả kèm mô tả ngắn gọn về mã HTTP/nội dung lỗi
+    // (nếu có), để hiện lên Toast giúp chẩn đoán chính xác chỗ bị chặn.
+    private fun postJsonDebug(urlString: String, body: JSONObject, apiKey: String): JsonDebugResult {
         return try {
             val connection = URL(urlString).openConnection() as HttpURLConnection
             connection.requestMethod = "POST"
@@ -371,18 +406,21 @@ object SquareApi {
 
             val code = connection.responseCode
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-            val responseText = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
-                ?: return null
+            val responseText = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
 
-            if (code !in 200..299) return null
+            if (code !in 200..299) {
+                return JsonDebugResult(null, "HTTP $code: ${responseText.take(200)}")
+            }
 
-            JSONObject(responseText)
+            JsonDebugResult(JSONObject(responseText), "OK")
         } catch (e: Exception) {
-            null
+            JsonDebugResult(null, e.message ?: e.javaClass.simpleName)
         }
     }
 
-    private fun putBytes(urlString: String, bytes: ByteArray, contentType: String): Boolean {
+    private data class PutDebugResult(val success: Boolean, val info: String)
+
+    private fun putBytesDebug(urlString: String, bytes: ByteArray, contentType: String): PutDebugResult {
         return try {
             val connection = URL(urlString).openConnection() as HttpURLConnection
             connection.requestMethod = "PUT"
@@ -391,9 +429,14 @@ object SquareApi {
             connection.connectTimeout = 20000
             connection.readTimeout = 30000
             connection.outputStream.use { it.write(bytes) }
-            connection.responseCode in 200..299
+
+            val code = connection.responseCode
+            if (code in 200..299) return PutDebugResult(true, "OK")
+
+            val errorText = connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+            PutDebugResult(false, "HTTP $code: ${errorText.take(200)}")
         } catch (e: Exception) {
-            false
+            PutDebugResult(false, e.message ?: e.javaClass.simpleName)
         }
     }
 
