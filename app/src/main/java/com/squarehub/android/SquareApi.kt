@@ -124,39 +124,52 @@ object SquareApi {
                 return UploadResult(null, "upload ảnh lên S3 thất bại (${put.info})")
             }
 
-            var imageUrl: String? = null
-            var lastStatusInfo = ""
-            for (attempt in 1..10) {
-                val statusBody = JSONObject().apply { put("fileTicket", fileTicket) }
-                val status = postJsonDebug("$ENDPOINT_V2/image/imageStatus", statusBody, apiKey)
-                val statusResp = status.json
-                lastStatusInfo = status.info
+            val statusResult = pollFileStatus(fileTicket, apiKey)
+            val imageUrl = statusResult.value
+                ?: return UploadResult(null, statusResult.error ?: "Binance xử lý ảnh thất bại")
 
-                if (statusResp != null) {
-                    apiErrorMessage(statusResp)?.let { return UploadResult(null, it) }
-                    val statusData = statusResp.optJSONObject("data") ?: statusResp
-                    val url = statusData.optString("imageUrl", "")
-                    val statusCode = statusData.optInt("status", -1)
-                    if (!url.isNullOrBlank()) {
-                        imageUrl = url
-                        break
-                    }
-                    if (statusCode == 2) {
-                        val reason = statusData.optString("failedReason", "")
-                        return UploadResult(null, "Binance xử lý ảnh thất bại${if (reason.isNotBlank()) ": $reason" else ""}")
-                    }
-                }
-                Thread.sleep(1000)
+            val url = imageUrl.optString("imageUrl", "")
+            if (url.isBlank()) {
+                return UploadResult(null, "Binance báo xử lý xong nhưng không có URL ảnh")
             }
 
-            if (imageUrl == null) {
-                return UploadResult(null, "Binance xử lý ảnh quá lâu, timeout ($lastStatusInfo)")
-            }
-
-            UploadResult(imageUrl, null)
+            UploadResult(url, null)
         } catch (e: Exception) {
             UploadResult(null, e.message ?: e.javaClass.simpleName)
         }
+    }
+
+    // Chờ Binance xử lý xong file đã upload (status == 1) rồi mới coi là sẵn
+    // sàng dùng. QUAN TRỌNG: trước đây app chỉ cần thấy field imageUrl không
+    // rỗng là coi như xong, nhưng Binance có thể trả imageUrl sớm trước khi
+    // xử lý xong hẳn, khiến bước đăng bài sau đó báo lỗi "Upload failed".
+    // Phải đợi đúng status == 1 mới được dùng, giống hệt cách Chrome
+    // extension đã chạy tốt đang làm.
+    private data class StatusResult(val value: JSONObject?, val error: String?)
+
+    private fun pollFileStatus(fileTicket: String, apiKey: String, maxAttempts: Int = 20): StatusResult {
+        var lastInfo = ""
+        for (attempt in 1..maxAttempts) {
+            val statusBody = JSONObject().apply { put("fileTicket", fileTicket) }
+            val status = postJsonDebug("$ENDPOINT_V2/image/imageStatus", statusBody, apiKey)
+            val statusResp = status.json
+            lastInfo = status.info
+
+            if (statusResp != null) {
+                apiErrorMessage(statusResp)?.let { return StatusResult(null, it) }
+                val statusData = statusResp.optJSONObject("data") ?: statusResp
+                val statusCode = statusData.optInt("status", -1)
+                if (statusCode == 1) {
+                    return StatusResult(statusData, null)
+                }
+                if (statusCode == 2) {
+                    val reason = statusData.optString("failedReason", "")
+                    return StatusResult(null, "Binance xử lý thất bại${if (reason.isNotBlank()) ": $reason" else ""}")
+                }
+            }
+            Thread.sleep(1500)
+        }
+        return StatusResult(null, "Binance xử lý quá lâu, timeout ($lastInfo)")
     }
 
     // ---------- Upload video ----------
@@ -189,6 +202,14 @@ object SquareApi {
             val put = putBytesDebug(presignedUrl, bytes, effectiveContentType)
             if (!put.success) {
                 return UploadResult(null, "upload video lên S3 thất bại (${put.info})")
+            }
+
+            // Đợi Binance xử lý xong video (cùng cơ chế status với ảnh) trước
+            // khi coi là sẵn sàng để đăng bài, tránh lỗi "Upload failed" do
+            // đăng bài quá sớm lúc video chưa xử lý xong.
+            val statusResult = pollFileStatus(fileTicket, apiKey, maxAttempts = 40)
+            if (statusResult.value == null) {
+                return UploadResult(null, statusResult.error ?: "Binance xử lý video thất bại")
             }
 
             UploadResult(fileTicket, null)
