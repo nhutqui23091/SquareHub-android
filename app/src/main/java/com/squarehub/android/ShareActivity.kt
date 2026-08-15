@@ -24,6 +24,10 @@ class ShareActivity : AppCompatActivity() {
     private var sharedText: String = ""
     private var sharedUrl: String? = null
 
+    // ID của bài X đang đăng (nếu có), dùng để cảnh báo chống đăng trùng và
+    // để đếm thống kê.
+    private var tweetId: String? = null
+
     private var localImageUris: MutableList<Uri> = mutableListOf()
     private var localVideoUri: Uri? = null
 
@@ -60,30 +64,34 @@ class ShareActivity : AppCompatActivity() {
         val streamUri = getStreamUri(intent)
         val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
 
+        // X thường kèm link bài viết trong phần text ngay cả khi chia sẻ
+        // kèm ảnh/video, nên luôn thử lấy tweetId ở đây để chống đăng trùng.
+        extractTweetId(text)?.let { tweetId = it }
+
         if (streamUri != null && type.startsWith("image/")) {
             localImageUris = mutableListOf(streamUri)
-            sharedText = text
+            sharedText = cleanText(text)
             startPosting()
             return
         }
 
         if (streamUri != null && type.startsWith("video/")) {
             localVideoUri = streamUri
-            sharedText = text
+            sharedText = cleanText(text)
             startPosting()
             return
         }
 
         // Trường hợp text/plain - thường gặp khi share 1 bài từ X, lúc này
         // thường chỉ có link, chưa có nội dung/ảnh/video thật.
-        sharedText = text
+        sharedText = cleanText(text)
 
         val matcher = Pattern.compile("https?://\\S+").matcher(text)
         if (matcher.find()) {
             sharedUrl = matcher.group()
         }
 
-        val isOnlyUrl = sharedUrl != null && sharedText.trim() == sharedUrl
+        val isOnlyUrl = sharedUrl != null && text.trim() == sharedUrl
         val isXLink = sharedUrl?.let {
             it.contains("twitter.com") || it.contains("x.com")
         } == true
@@ -98,8 +106,31 @@ class ShareActivity : AppCompatActivity() {
     private fun handleMultipleSend() {
         val uris = getStreamUriList(intent) ?: arrayListOf()
         localImageUris = uris.take(4).toMutableList()
-        sharedText = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
+        val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
+        extractTweetId(text)?.let { tweetId = it }
+        sharedText = cleanText(text)
         startPosting()
+    }
+
+    // Lấy ID bài viết X từ 1 đoạn text bất kỳ (nếu có chứa link dạng
+    // .../status/12345...).
+    private fun extractTweetId(text: String): String? {
+        val matcher = Pattern.compile("status/(\\d+)").matcher(text)
+        return if (matcher.find()) matcher.group(1) else null
+    }
+
+    // X hay tự kèm link rút gọn dạng t.co vào cuối phần text (link tới
+    // ảnh/video đính kèm hoặc chính bài viết), dù ảnh/video đã được đăng
+    // riêng rồi. Bỏ hết các link này ra khỏi nội dung đăng lên Square, vì
+    // người dùng chỉ muốn đúng nội dung bài, không cần link X.
+    private fun cleanText(text: String): String {
+        var cleaned = text.replace(Regex("https?://t\\.co/\\S+"), "")
+        // Cũng bỏ luôn nếu còn sót link thẳng tới bài viết X/Twitter.
+        cleaned = cleaned.replace(Regex("https?://(www\\.)?(twitter|x)\\.com/\\S+"), "")
+        // Dọn khoảng trắng/dòng trống thừa ra do vừa xoá link.
+        cleaned = cleaned.replace(Regex("[ \\t]+\\n"), "\n")
+        cleaned = cleaned.replace(Regex("\\n{3,}"), "\n\n")
+        return cleaned.trim()
     }
 
     // Lấy nội dung thật (text/ảnh/video) từ link bài viết X - không giữ
@@ -113,9 +144,9 @@ class ShareActivity : AppCompatActivity() {
 
                 if (content == null) {
                     val tweetText = withContext(Dispatchers.IO) { SquareApi.fetchTweetText(url) }
-                    sharedText = tweetText ?: ""
+                    sharedText = cleanText(tweetText ?: "")
                 } else {
-                    sharedText = content.text
+                    sharedText = cleanText(content.text)
 
                     if (content.videoUrl != null) {
                         remoteVideoUrl = content.videoUrl
@@ -143,6 +174,14 @@ class ShareActivity : AppCompatActivity() {
             return
         }
 
+        // Cảnh báo nếu bài X này đã được đăng lên Square từ app này trước
+        // đó rồi, tránh lỡ tay đăng trùng.
+        if (PostStats.isAlreadyPosted(this, tweetId)) {
+            toast("⚠️ Bài này đã được đăng lên Square trước đó rồi, không đăng lại.")
+            finish()
+            return
+        }
+
         val hasAnyContent = sharedText.isNotBlank() ||
             localImageUris.isNotEmpty() ||
             localVideoUri != null ||
@@ -163,6 +202,10 @@ class ShareActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 Log.e("SquareHub", "post failed", e)
                 SquarePostResult(false, null, "Lỗi: ${e.message ?: e.javaClass.simpleName}")
+            }
+
+            if (result.success) {
+                PostStats.recordSuccess(this@ShareActivity, tweetId)
             }
 
             toast(if (result.success) "✅ ${result.message}" else "❌ ${result.message}")

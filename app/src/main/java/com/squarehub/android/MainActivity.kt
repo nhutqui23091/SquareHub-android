@@ -26,5 +26,20 @@ class MainActivity : AppCompatActivity() {
             statusText.text = "Đã lưu"
             Toast.makeText(this, "Đã lưu API key", Toast.LENGTH_SHORT).show()
         }
+
+        refreshStats()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Cập nhật lại số liệu mỗi lần quay lại màn hình này, vd sau khi vừa
+        // đăng xong 1 bài từ Share Sheet rồi mở lại app.
+        refreshStats()
+    }
+
+    private fun refreshStats() {
+        val stats = PostStats.getStats(this)
+        findViewById<TextView>(R.id.totalCountText).text = stats.total.toString()
+        findViewById<TextView>(R.id.todayCountText).text = stats.today.toString()
     }
 }
