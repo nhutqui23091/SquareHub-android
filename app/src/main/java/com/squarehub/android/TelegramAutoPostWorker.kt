@@ -64,11 +64,17 @@ class TelegramAutoPostWorker(
         private const val NOTIFICATION_CHANNEL_ID = "telegram_auto_post"
         private const val NOTIFICATION_ID = 9001
         private const val SNIPPET_LENGTH = 60
+
+        // Cờ input để chạy quét thủ công (nút "Quét ngay" trong TelegramActivity)
+        // - bỏ qua điều kiện "đã bật công tắc tổng", vì mục đích lúc đó là test
+        // xem đọc kênh có ra bài không, không phải chạy như lịch nền thật.
+        const val INPUT_FORCE = "force"
     }
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+        val force = inputData.getBoolean(INPUT_FORCE, false)
         try {
-            runCheck()
+            runCheck(force)
         } catch (e: Exception) {
             // Không để 1 lỗi bất ngờ (mất mạng, kênh bị khoá...) làm hỏng cả
             // lịch chạy định kỳ - lần kiểm tra kế tiếp (15') sẽ tự chạy lại.
@@ -76,10 +82,10 @@ class TelegramAutoPostWorker(
         Result.success()
     }
 
-    private fun runCheck() {
+    private fun runCheck(force: Boolean) {
         val appContext = applicationContext
 
-        if (!TelegramChannels.isMasterEnabled(appContext)) return
+        if (!force && !TelegramChannels.isMasterEnabled(appContext)) return
 
         val prefs = appContext.getSharedPreferences(Config.PREFS_NAME, Context.MODE_PRIVATE)
         val apiKey = prefs.getString(Config.API_KEY_PREF, "") ?: ""
@@ -160,7 +166,8 @@ class TelegramAutoPostWorker(
                     success = false,
                     snippet = "",
                     message = "Không đọc được bài nào từ t.me/s/${channel.username} " +
-                        "(kiểm tra lại tên kênh, hoặc kênh có thể riêng tư/không tồn tại)"
+                        "(kênh phải là kênh CÔNG KHAI - private/nhóm riêng tư sẽ không đọc được; " +
+                        "hoặc kiểm tra lại tên kênh có đúng không)"
                 )
             )
         }
