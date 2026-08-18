@@ -40,7 +40,7 @@
         android:layout_height="0dp"
         android:layout_weight="1">
 
-        <!-- ---------- TAB 1: TRANG CHỦ ---------- -->
+        <!-- ===== TAB 1: TRANG CHỦ ===== -->
         <ScrollView
             android:id="@+id/tabHomeContent"
             android:layout_width="match_parent"
@@ -203,7 +203,7 @@
 
         </ScrollView>
 
-        <!-- ---------- TAB 2: TELEGRAM ---------- -->
+        <!-- ===== TAB 2: TELEGRAM ===== -->
         <ScrollView
             android:id="@+id/tabTelegramContent"
             android:layout_width="match_parent"
@@ -301,7 +301,7 @@
                             android:layout_weight="1"
                             android:layout_marginEnd="8dp"
                             android:textSize="14sp"
-                            android:hint="@tên kênh hoặc link t.me/..." />
+                            android:hint="\@tên kênh hoặc link t.me/..." />
 
                         <Button
                             android:id="@+id/addChannelButton"
@@ -330,7 +330,7 @@
 
         </ScrollView>
 
-        <!-- ---------- TAB 3: LỊCH SỬ ---------- -->
+        <!-- ===== TAB 3: LỊCH SỬ ===== -->
         <ScrollView
             android:id="@+id/tabHistoryContent"
             android:layout_width="match_parent"
