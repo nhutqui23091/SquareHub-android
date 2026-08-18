@@ -2,6 +2,7 @@ package com.squarehub.android
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
@@ -14,12 +15,16 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var telegramMasterSwitch: Switch
     private lateinit var telegramChannelField: EditText
     private lateinit var telegramChannelListContainer: LinearLayout
+    private lateinit var telegramScanLogContainer: LinearLayout
 
     private val notificationPermissionRequestCode = 1001
 
@@ -78,15 +83,24 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        telegramScanLogContainer = findViewById(R.id.telegramScanLogContainer)
+        findViewById<Button>(R.id.clearScanLogButton).setOnClickListener {
+            TelegramScanLog.clear(this)
+            refreshScanLog()
+        }
+
         refreshStats()
         refreshChannelList()
+        refreshScanLog()
     }
 
     override fun onResume() {
         super.onResume()
-        // Cập nhật lại số liệu mỗi lần quay lại màn hình này, vd sau khi vừa
-        // đăng xong 1 bài từ Share Sheet rồi mở lại app.
+        // Cập nhật lại số liệu/lịch sử mỗi lần quay lại màn hình này, vd sau
+        // khi vừa đăng xong 1 bài từ Share Sheet, hoặc sau khi có lần quét
+        // Telegram mới chạy trong nền.
         refreshStats()
+        refreshScanLog()
     }
 
     private fun refreshStats() {
@@ -134,6 +148,64 @@ class MainActivity : AppCompatActivity() {
             row.addView(enableSwitch)
             row.addView(removeButton)
             telegramChannelListContainer.addView(row)
+        }
+    }
+
+    // Vẽ lại lịch sử quét Telegram (mới nhất trước) - mỗi lần quét hiện tóm
+    // tắt (kiểm tra mấy kênh, mấy bài mới), kèm từng bài đã đăng có thành
+    // công không và vài chữ đầu nội dung, để người dùng tự xác nhận tính
+    // năng có đang thật sự chạy hay không mà không cần đoán mò.
+    private fun refreshScanLog() {
+        telegramScanLogContainer.removeAllViews()
+
+        val scans = TelegramScanLog.getScans(this).take(30)
+
+        if (scans.isEmpty()) {
+            val empty = TextView(this).apply {
+                text = "Chưa có lần quét nào."
+                textSize = 12f
+                setTextColor(Color.parseColor("#999999"))
+            }
+            telegramScanLogContainer.addView(empty)
+            return
+        }
+
+        val timeFormat = SimpleDateFormat("HH:mm dd/MM", Locale.getDefault())
+
+        for (scan in scans) {
+            val timeText = timeFormat.format(Date(scan.timestampMs))
+            val summary = if (scan.posts.isEmpty()) {
+                "$timeText – kiểm tra ${scan.channelsChecked} kênh, không có bài mới"
+            } else {
+                val successCount = scan.posts.count { it.success }
+                "$timeText – kiểm tra ${scan.channelsChecked} kênh, ${scan.posts.size} bài ($successCount thành công)"
+            }
+
+            val summaryText = TextView(this).apply {
+                text = summary
+                textSize = 12f
+                setTextColor(Color.parseColor("#444444"))
+                setPadding(0, 10, 0, 2)
+            }
+            telegramScanLogContainer.addView(summaryText)
+
+            for (post in scan.posts) {
+                val icon = if (post.success) "✅" else "❌"
+                val detail = if (post.success) {
+                    "$icon @${post.channelUsername}: ${post.snippet}"
+                } else {
+                    val base = post.snippet.ifBlank { "(không có nội dung)" }
+                    "$icon @${post.channelUsername}: $base — ${post.message}"
+                }
+
+                val detailText = TextView(this).apply {
+                    text = detail
+                    textSize = 12f
+                    setPadding(16, 2, 0, 2)
+                    setTextColor(Color.parseColor(if (post.success) "#2e7d32" else "#c62828"))
+                }
+                telegramScanLogContainer.addView(detailText)
+            }
         }
     }
 

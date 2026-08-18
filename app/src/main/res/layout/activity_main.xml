@@ -173,6 +173,37 @@
             android:layout_marginBottom="8dp" />
 
         <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="Lịch sử quét"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="4dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Mỗi lần app tự kiểm tra kênh (khoảng 15 phút/lần) sẽ hiện ở đây, kèm bài nào đã đăng và có thành công không."
+            android:textSize="11sp"
+            android:textColor="#777777"
+            android:layout_marginBottom="8dp" />
+
+        <LinearLayout
+            android:id="@+id/telegramScanLogContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="8dp" />
+
+        <Button
+            android:id="@+id/clearScanLogButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:text="Xoá lịch sử quét" />
+
+        <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="32dp"

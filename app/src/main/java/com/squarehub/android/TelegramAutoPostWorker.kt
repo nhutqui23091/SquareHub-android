@@ -63,6 +63,7 @@ class TelegramAutoPostWorker(
                 "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         private const val NOTIFICATION_CHANNEL_ID = "telegram_auto_post"
         private const val NOTIFICATION_ID = 9001
+        private const val SNIPPET_LENGTH = 60
     }
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
@@ -87,30 +88,41 @@ class TelegramAutoPostWorker(
         val channels = TelegramChannels.getChannels(appContext).filter { it.enabled }
         if (channels.isEmpty()) return
 
-        var postedCount = 0
-        var errorCount = 0
+        val allEntries = mutableListOf<TelegramScanLog.PostEntry>()
 
         for (channel in channels) {
             try {
-                val (posted, errors) = checkChannel(appContext, channel, apiKey)
-                postedCount += posted
-                errorCount += errors
+                allEntries.addAll(checkChannel(appContext, channel, apiKey))
             } catch (e: Exception) {
-                errorCount++
+                allEntries.add(
+                    TelegramScanLog.PostEntry(
+                        channelUsername = channel.username,
+                        success = false,
+                        snippet = "",
+                        message = "Lỗi kiểm tra kênh: ${e.message ?: e.javaClass.simpleName}"
+                    )
+                )
             }
         }
 
+        // Ghi lại lịch sử quét lần này (kể cả khi không có bài mới nào), để
+        // người dùng tự xem lại app có thật sự đang chạy nền hay không.
+        TelegramScanLog.recordScan(appContext, channels.size, allEntries)
+
+        val postedCount = allEntries.count { it.success }
+        val errorCount = allEntries.count { !it.success }
         if (postedCount > 0 || errorCount > 0) {
             notifyResult(appContext, postedCount, errorCount)
         }
     }
 
-    // Trả về (số bài đăng thành công, số bài lỗi) cho riêng kênh này.
+    // Trả về danh sách kết quả đăng bài (nếu có) cho riêng kênh này, để ghi
+    // vào lịch sử quét.
     private fun checkChannel(
         context: Context,
         channel: TelegramChannels.Channel,
         apiKey: String
-    ): Pair<Int, Int> {
+    ): List<TelegramScanLog.PostEntry> {
         val doc = Jsoup.connect("https://t.me/s/${channel.username}")
             .userAgent(DESKTOP_USER_AGENT)
             .timeout(20000)
@@ -137,57 +149,91 @@ class TelegramAutoPostWorker(
             messages.add(Msg(postId, text, photoUrls, videoUrl))
         }
 
-        if (messages.isEmpty()) return Pair(0, 0)
+        // Nếu không đọc được bài nào cả (khác 0 bài mới - đây là KHÔNG đọc
+        // được bài NÀO trên trang), rất có thể trang t.me/s/ đã đổi cấu trúc
+        // hoặc tên kênh sai/kênh riêng tư - báo rõ để dò lỗi, thay vì im lặng
+        // trông giống hệt "không có bài mới".
+        if (messages.isEmpty()) {
+            return listOf(
+                TelegramScanLog.PostEntry(
+                    channelUsername = channel.username,
+                    success = false,
+                    snippet = "",
+                    message = "Không đọc được bài nào từ t.me/s/${channel.username} " +
+                        "(kiểm tra lại tên kênh, hoặc kênh có thể riêng tư/không tồn tại)"
+                )
+            )
+        }
 
         val maxSeenId = messages.maxOf { it.postId }
 
-        // Lần đầu tiên theo dõi kênh này (chưa từng chạy) - chỉ ghi nhận mốc
-        // hiện tại làm baseline, KHÔNG đăng lại toàn bộ lịch sử kênh, tránh
-        // spam hàng loạt bài cũ ngay khi vừa thêm/bật kênh.
+        // Lần đầu tiên theo dõi kênh này (chưa từng chạy): đăng luôn bài mới
+        // nhất hiện có (không đăng lại toàn bộ lịch sử, tránh spam), rồi lấy
+        // mốc từ bài đó trở đi cho các lần quét sau.
         if (channel.lastPostId == 0L) {
             TelegramChannels.updateLastPostId(context, channel.username, maxSeenId)
-            return Pair(0, 0)
+            val latest = messages.maxByOrNull { it.postId } ?: return emptyList()
+            return processMessage(context, channel, latest, apiKey)?.let { listOf(it) } ?: emptyList()
         }
 
         val newMessages = messages
             .filter { it.postId > channel.lastPostId }
             .sortedBy { it.postId }
 
-        if (newMessages.isEmpty()) return Pair(0, 0)
+        if (newMessages.isEmpty()) return emptyList()
 
-        var posted = 0
-        var errors = 0
-
+        val entries = mutableListOf<TelegramScanLog.PostEntry>()
         for (msg in newMessages) {
-            val postId = TextCleaner.telegramPostId(channel.username, msg.postId)
-
             // Luôn cập nhật mốc lastPostId dù bỏ qua/thành công/thất bại, để
             // tránh kẹt lại mãi ở 1 bài và không bao giờ qua được các bài sau.
             TelegramChannels.updateLastPostId(context, channel.username, msg.postId)
+            processMessage(context, channel, msg, apiKey)?.let { entries.add(it) }
+        }
+        return entries
+    }
 
-            if (PostStats.isAlreadyPosted(context, postId)) continue
+    // Trả về null nếu bỏ qua (đã đăng trùng trước đó / không có nội dung gì
+    // để đăng), hoặc 1 PostEntry ghi lại kết quả đăng để hiện trong lịch sử
+    // quét.
+    private fun processMessage(
+        context: Context,
+        channel: TelegramChannels.Channel,
+        msg: Msg,
+        apiKey: String
+    ): TelegramScanLog.PostEntry? {
+        val postId = TextCleaner.telegramPostId(channel.username, msg.postId)
+        if (PostStats.isAlreadyPosted(context, postId)) return null
 
-            val cleanedText = TextCleaner.cleanText(msg.text)
-            val hasContent = cleanedText.isNotBlank() || msg.photoUrls.isNotEmpty() || msg.videoUrl != null
-            if (!hasContent) continue
+        val cleanedText = TextCleaner.cleanText(msg.text)
+        val hasContent = cleanedText.isNotBlank() || msg.photoUrls.isNotEmpty() || msg.videoUrl != null
+        if (!hasContent) return null
 
-            val result = SquareApi.postRemoteContent(
-                context,
-                cleanedText,
-                msg.photoUrls.take(4),
-                msg.videoUrl,
-                apiKey
-            )
+        val result = SquareApi.postRemoteContent(
+            context,
+            cleanedText,
+            msg.photoUrls.take(4),
+            msg.videoUrl,
+            apiKey
+        )
 
-            if (result.success) {
-                PostStats.recordSuccess(context, postId)
-                posted++
-            } else {
-                errors++
-            }
+        if (result.success) {
+            PostStats.recordSuccess(context, postId)
         }
 
-        return Pair(posted, errors)
+        val snippet = when {
+            cleanedText.isNotBlank() -> {
+                if (cleanedText.length > SNIPPET_LENGTH) cleanedText.take(SNIPPET_LENGTH) + "…" else cleanedText
+            }
+            msg.videoUrl != null -> "(video, không có chữ)"
+            else -> "(ảnh, không có chữ)"
+        }
+
+        return TelegramScanLog.PostEntry(
+            channelUsername = channel.username,
+            success = result.success,
+            snippet = snippet,
+            message = result.message
+        )
     }
 
     private fun notifyResult(context: Context, posted: Int, errors: Int) {
@@ -206,7 +252,7 @@ class TelegramAutoPostWorker(
             if (posted > 0) append("Đã tự động đăng $posted bài mới lên Square")
             if (errors > 0) {
                 if (isNotEmpty()) append(", ")
-                append("$errors bài lỗi")
+                append("$errors lỗi")
             }
         }
 
