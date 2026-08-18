@@ -1,7 +1,12 @@
 package com.squarehub.android
 
+import android.content.Context
+import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URI
@@ -215,6 +220,111 @@ object SquareApi {
             UploadResult(fileTicket, null)
         } catch (e: Exception) {
             UploadResult(null, e.message ?: e.javaClass.simpleName)
+        }
+    }
+
+    // ---------- Đăng nội dung khi ảnh/video là link từ xa ----------
+
+    // Dùng chung cho cả luồng chia sẻ bài X qua link (ShareActivity) lẫn luồng
+    // tự động lấy bài kênh Telegram (TelegramAutoPostWorker): tự tải file từ
+    // link, tự nhận dạng định dạng thật, tự upload lên Binance rồi đăng. Ưu
+    // tiên: video > ảnh > chỉ text - Binance Square không cho đăng ảnh và
+    // video cùng lúc trong 1 bài.
+    fun postRemoteContent(
+        context: Context,
+        text: String,
+        photoUrls: List<String>,
+        videoUrl: String?,
+        apiKey: String
+    ): SquarePostResult {
+        if (videoUrl != null) {
+            val dl = downloadBytesDebug(videoUrl, accept = "video/mp4,video/*;q=0.9,*/*;q=0.1")
+            val bytes = dl.bytes
+                ?: return SquarePostResult(false, null, "Không tải được video từ bài viết (${dl.info})")
+            val videoContentType = normalizeVideoContentType(dl.contentType)
+            val videoExt = extensionForVideoContentType(videoContentType)
+            return postVideoBytesFromContext(context, text, bytes, "remote_video.$videoExt", apiKey, videoContentType)
+        }
+
+        if (photoUrls.isNotEmpty()) {
+            val urls = mutableListOf<String>()
+            var lastError = ""
+            for ((index, photoUrl) in photoUrls.withIndex()) {
+                val dl = downloadBytesDebug(photoUrl, accept = "image/*")
+                if (dl.bytes == null) {
+                    lastError = dl.info
+                    continue
+                }
+                val imageContentType = normalizeImageContentType(dl.contentType, photoUrl)
+                val imageExt = extensionForImageContentType(imageContentType)
+                val uploaded = uploadImageBytes(dl.bytes, "remote_image_$index.$imageExt", apiKey, imageContentType)
+                if (uploaded.value != null) urls.add(uploaded.value) else lastError = uploaded.error ?: "upload lên Binance thất bại"
+            }
+            if (urls.isEmpty()) return SquarePostResult(false, null, "Không tải được ảnh từ bài viết ($lastError)")
+            return postImages(text, urls, apiKey)
+        }
+
+        if (text.isBlank()) {
+            return SquarePostResult(false, null, "Không có nội dung để đăng")
+        }
+
+        return postText(text, apiKey)
+    }
+
+    // Đăng video kèm việc tự tạo ảnh bìa + lấy thời lượng - dùng chung cho cả
+    // video chọn từ máy (ShareActivity) lẫn video tải về từ link bài viết
+    // (X/Telegram). Cần Context để tạo file tạm trong cacheDir cho
+    // MediaMetadataRetriever đọc.
+    fun postVideoBytesFromContext(
+        context: Context,
+        text: String,
+        bytes: ByteArray,
+        fileName: String,
+        apiKey: String,
+        contentType: String? = null
+    ): SquarePostResult {
+        val videoUpload = uploadVideoBytes(bytes, fileName, apiKey, contentType)
+        val fileTicket = videoUpload.value
+            ?: return SquarePostResult(false, null, "Không tải video lên được (${videoUpload.error})")
+
+        val info = extractVideoInfo(context, bytes)
+        val bitmap = info.coverBitmap
+            ?: return SquarePostResult(false, null, "Không tạo được ảnh bìa cho video")
+
+        val output = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 85, output)
+
+        val coverUpload = uploadImageBytes(output.toByteArray(), "video_cover.jpg", apiKey)
+        val coverUrl = coverUpload.value
+            ?: return SquarePostResult(false, null, "Không tải được ảnh bìa video (${coverUpload.error})")
+
+        return postVideo(text, fileTicket, coverUrl, info.durationSeconds, apiKey)
+    }
+
+    private data class VideoInfo(val coverBitmap: Bitmap?, val durationSeconds: Double)
+
+    private fun extractVideoInfo(context: Context, videoBytes: ByteArray): VideoInfo {
+        var tempFile: File? = null
+
+        return try {
+            tempFile = File.createTempFile("square_video", ".mp4", context.cacheDir)
+            tempFile.writeBytes(videoBytes)
+
+            val retriever = MediaMetadataRetriever()
+            retriever.setDataSource(tempFile.absolutePath)
+
+            val frame = retriever.getFrameAtTime(0)
+            val durationMs = retriever.extractMetadata(
+                MediaMetadataRetriever.METADATA_KEY_DURATION
+            )?.toLongOrNull() ?: 0L
+
+            retriever.release()
+
+            VideoInfo(frame, durationMs / 1000.0)
+        } catch (e: Exception) {
+            VideoInfo(null, 0.0)
+        } finally {
+            tempFile?.delete()
         }
     }
 

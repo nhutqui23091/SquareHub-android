@@ -2,6 +2,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Android 13+ yêu cầu quyền này mới hiện được thông báo báo kết quả
+         mỗi lần tự động kiểm tra/đăng bài Telegram trong nền. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Chạy đúng lịch mỗi 15 phút thay vì bị hệ thống gộp/trễ nhiều -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:allowBackup="true"

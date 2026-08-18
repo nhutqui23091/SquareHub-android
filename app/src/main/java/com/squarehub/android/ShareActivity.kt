@@ -1,8 +1,6 @@
 package com.squarehub.android
 
 import android.content.Intent
-import android.graphics.Bitmap
-import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -13,8 +11,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.ByteArrayOutputStream
-import java.io.File
 import java.util.regex.Pattern
 
 // Không hiện khung xem trước nữa - bấm chia sẻ là tự động đăng luôn,
@@ -64,27 +60,28 @@ class ShareActivity : AppCompatActivity() {
         val streamUri = getStreamUri(intent)
         val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
 
-        // X thường kèm link bài viết trong phần text ngay cả khi chia sẻ
-        // kèm ảnh/video, nên luôn thử lấy tweetId ở đây để chống đăng trùng.
-        extractTweetId(text)?.let { tweetId = it }
+        // X/Telegram thường kèm link bài viết trong phần text ngay cả khi
+        // chia sẻ kèm ảnh/video, nên luôn thử lấy ID bài ở đây để chống
+        // đăng trùng.
+        TextCleaner.extractPostId(text)?.let { tweetId = it }
 
         if (streamUri != null && type.startsWith("image/")) {
             localImageUris = mutableListOf(streamUri)
-            sharedText = cleanText(text)
+            sharedText = TextCleaner.cleanText(text)
             startPosting()
             return
         }
 
         if (streamUri != null && type.startsWith("video/")) {
             localVideoUri = streamUri
-            sharedText = cleanText(text)
+            sharedText = TextCleaner.cleanText(text)
             startPosting()
             return
         }
 
         // Trường hợp text/plain - thường gặp khi share 1 bài từ X, lúc này
         // thường chỉ có link, chưa có nội dung/ảnh/video thật.
-        sharedText = cleanText(text)
+        sharedText = TextCleaner.cleanText(text)
 
         val matcher = Pattern.compile("https?://\\S+").matcher(text)
         if (matcher.find()) {
@@ -107,30 +104,9 @@ class ShareActivity : AppCompatActivity() {
         val uris = getStreamUriList(intent) ?: arrayListOf()
         localImageUris = uris.take(4).toMutableList()
         val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
-        extractTweetId(text)?.let { tweetId = it }
-        sharedText = cleanText(text)
+        TextCleaner.extractPostId(text)?.let { tweetId = it }
+        sharedText = TextCleaner.cleanText(text)
         startPosting()
-    }
-
-    // Lấy ID bài viết X từ 1 đoạn text bất kỳ (nếu có chứa link dạng
-    // .../status/12345...).
-    private fun extractTweetId(text: String): String? {
-        val matcher = Pattern.compile("status/(\\d+)").matcher(text)
-        return if (matcher.find()) matcher.group(1) else null
-    }
-
-    // X hay tự kèm link rút gọn dạng t.co vào cuối phần text (link tới
-    // ảnh/video đính kèm hoặc chính bài viết), dù ảnh/video đã được đăng
-    // riêng rồi. Bỏ hết các link này ra khỏi nội dung đăng lên Square, vì
-    // người dùng chỉ muốn đúng nội dung bài, không cần link X.
-    private fun cleanText(text: String): String {
-        var cleaned = text.replace(Regex("https?://t\\.co/\\S+"), "")
-        // Cũng bỏ luôn nếu còn sót link thẳng tới bài viết X/Twitter.
-        cleaned = cleaned.replace(Regex("https?://(www\\.)?(twitter|x)\\.com/\\S+"), "")
-        // Dọn khoảng trắng/dòng trống thừa ra do vừa xoá link.
-        cleaned = cleaned.replace(Regex("[ \\t]+\\n"), "\n")
-        cleaned = cleaned.replace(Regex("\\n{3,}"), "\n\n")
-        return cleaned.trim()
     }
 
     // Lấy nội dung thật (text/ảnh/video) từ link bài viết X - không giữ
@@ -144,9 +120,9 @@ class ShareActivity : AppCompatActivity() {
 
                 if (content == null) {
                     val tweetText = withContext(Dispatchers.IO) { SquareApi.fetchTweetText(url) }
-                    sharedText = cleanText(tweetText ?: "")
+                    sharedText = TextCleaner.cleanText(tweetText ?: "")
                 } else {
-                    sharedText = cleanText(content.text)
+                    sharedText = TextCleaner.cleanText(content.text)
 
                     if (content.videoUrl != null) {
                         remoteVideoUrl = content.videoUrl
@@ -214,26 +190,14 @@ class ShareActivity : AppCompatActivity() {
     }
 
     // Ưu tiên: video > ảnh > chỉ text. Binance Square không cho đăng
-    // ảnh và video cùng lúc trong 1 bài.
+    // ảnh và video cùng lúc trong 1 bài. Nhánh ảnh/video từ xa (lấy được từ
+    // link bài X) và text-only dùng chung logic với luồng tự động Telegram,
+    // qua SquareApi.postRemoteContent.
     private fun doPost(apiKey: String): SquarePostResult {
         if (localVideoUri != null) {
             val bytes = readUriBytes(localVideoUri!!)
                 ?: return SquarePostResult(false, null, "Không đọc được file video")
-            return postVideoBytes(bytes, "share_video.mp4", apiKey)
-        }
-
-        if (remoteVideoUrl != null) {
-            val dl = SquareApi.downloadBytesDebug(
-                remoteVideoUrl!!,
-                accept = "video/mp4,video/*;q=0.9,*/*;q=0.1"
-            )
-            val bytes = dl.bytes
-                ?: return SquarePostResult(false, null, "Không tải được video từ bài viết (${dl.info})")
-            // Dùng đúng Content-Type thật (mp4/webm) lấy từ response, tránh
-            // lệch định dạng khi upload lên Binance.
-            val videoContentType = SquareApi.normalizeVideoContentType(dl.contentType)
-            val videoExt = SquareApi.extensionForVideoContentType(videoContentType)
-            return postVideoBytes(bytes, "tweet_video.$videoExt", apiKey, videoContentType)
+            return SquareApi.postVideoBytesFromContext(this, sharedText, bytes, "share_video.mp4", apiKey)
         }
 
         if (localImageUris.isNotEmpty()) {
@@ -252,88 +216,7 @@ class ShareActivity : AppCompatActivity() {
             return SquareApi.postImages(sharedText, urls, apiKey)
         }
 
-        if (remotePhotoUrls.isNotEmpty()) {
-            val urls = mutableListOf<String>()
-            var lastError = ""
-            for ((index, photoUrl) in remotePhotoUrls.withIndex()) {
-                val dl = SquareApi.downloadBytesDebug(photoUrl, accept = "image/*")
-                if (dl.bytes == null) {
-                    lastError = dl.info
-                    continue
-                }
-                // Dùng đúng Content-Type thật (jpeg/png/webp/gif) lấy từ
-                // response, tránh lệch định dạng khiến upload lên Binance
-                // (presigned S3 URL) bị từ chối.
-                val imageContentType = SquareApi.normalizeImageContentType(dl.contentType, photoUrl)
-                val imageExt = SquareApi.extensionForImageContentType(imageContentType)
-                val uploaded = SquareApi.uploadImageBytes(
-                    dl.bytes,
-                    "tweet_image_$index.$imageExt",
-                    apiKey,
-                    imageContentType
-                )
-                if (uploaded.value != null) urls.add(uploaded.value) else lastError = uploaded.error ?: "upload lên Binance thất bại"
-            }
-            if (urls.isEmpty()) return SquarePostResult(false, null, "Không tải được ảnh từ bài viết ($lastError)")
-            return SquareApi.postImages(sharedText, urls, apiKey)
-        }
-
-        if (sharedText.isBlank()) {
-            return SquarePostResult(false, null, "Không có nội dung để đăng")
-        }
-
-        return SquareApi.postText(sharedText, apiKey)
-    }
-
-    private fun postVideoBytes(
-        bytes: ByteArray,
-        fileName: String,
-        apiKey: String,
-        contentType: String? = null
-    ): SquarePostResult {
-        val videoUpload = SquareApi.uploadVideoBytes(bytes, fileName, apiKey, contentType)
-        val fileTicket = videoUpload.value
-            ?: return SquarePostResult(false, null, "Không tải video lên được (${videoUpload.error})")
-
-        val info = extractVideoInfo(bytes)
-        val bitmap = info.coverBitmap
-            ?: return SquarePostResult(false, null, "Không tạo được ảnh bìa cho video")
-
-        val output = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 85, output)
-
-        val coverUpload = SquareApi.uploadImageBytes(output.toByteArray(), "video_cover.jpg", apiKey)
-        val coverUrl = coverUpload.value
-            ?: return SquarePostResult(false, null, "Không tải được ảnh bìa video (${coverUpload.error})")
-
-        return SquareApi.postVideo(sharedText, fileTicket, coverUrl, info.durationSeconds, apiKey)
-    }
-
-    private data class VideoInfo(val coverBitmap: Bitmap?, val durationSeconds: Double)
-
-    private fun extractVideoInfo(videoBytes: ByteArray): VideoInfo {
-        var tempFile: File? = null
-
-        return try {
-            tempFile = File.createTempFile("square_video", ".mp4", cacheDir)
-            tempFile.writeBytes(videoBytes)
-
-            val retriever = MediaMetadataRetriever()
-            retriever.setDataSource(tempFile.absolutePath)
-
-            val frame = retriever.getFrameAtTime(0)
-            val durationMs = retriever.extractMetadata(
-                MediaMetadataRetriever.METADATA_KEY_DURATION
-            )?.toLongOrNull() ?: 0L
-
-            retriever.release()
-
-            VideoInfo(frame, durationMs / 1000.0)
-        } catch (e: Exception) {
-            VideoInfo(null, 0.0)
-        } finally {
-            tempFile?.delete()
-        }
+        return SquareApi.postRemoteContent(this, sharedText, remotePhotoUrls, remoteVideoUrl, apiKey)
     }
 
     private fun readUriBytes(uri: Uri): ByteArray? {

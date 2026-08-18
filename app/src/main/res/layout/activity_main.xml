@@ -107,11 +107,76 @@
             android:layout_marginTop="8dp"
             android:textColor="#2e7d32" />
 
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="28dp"
+            android:layout_marginBottom="16dp"
+            android:background="#E0E0E0" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Tự động đăng bài từ Telegram"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Bật tự động kiểm tra (mỗi 15 phút, kể cả khi không mở app)"
+                android:textSize="13sp" />
+
+            <Switch
+                android:id="@+id/telegramMasterSwitch"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="8dp">
+
+            <EditText
+                android:id="@+id/telegramChannelField"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginEnd="8dp"
+                android:hint="@ tên kênh hoặc link t.me/..." />
+
+            <Button
+                android:id="@+id/addChannelButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Thêm" />
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/telegramChannelListContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="8dp" />
+
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="32dp"
-            android:text="Cách dùng:\n1. Nhập API key ở trên rồi bấm Lưu.\n2. Mở app X → chọn bài viết → bấm Chia sẻ.\n3. Chọn SquareHub trong danh sách hiện ra.\n4. Xem trước nội dung rồi bấm Đăng." />
+            android:text="Cách dùng:\n1. Nhập API key ở trên rồi bấm Lưu.\n2. Mở app X → chọn bài viết → bấm Chia sẻ.\n3. Chọn SquareHub trong danh sách hiện ra.\n4. Xem trước nội dung rồi bấm Đăng.\n\nTự động Telegram: thêm kênh ở trên rồi bật công tắc - app sẽ tự kiểm tra kênh mỗi 15 phút và tự đăng bài mới lên Square, kể cả khi bạn không mở app." />
 
     </LinearLayout>
 
