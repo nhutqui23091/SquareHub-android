@@ -48,6 +48,37 @@ object TextCleaner {
         return cleaned.trim()
     }
 
+    // Các câu thông báo hệ thống Telegram tự sinh ra trong kênh (không phải
+    // bài đăng thật của chủ kênh). Những dòng này KHÔNG được đăng lên Square.
+    private val SERVICE_MESSAGE_PATTERNS = listOf(
+        "channel created",
+        "group created",
+        "channel photo updated",
+        "channel photo removed",
+        "channel name was changed",
+        "messages in this channel will be automatically deleted",
+        "messages in this group will be automatically deleted",
+        "pinned a message",
+        "pinned «",
+        "joined the group",
+        "joined the channel",
+        "video chat started",
+        "video chat ended",
+        "voice chat started",
+        "voice chat ended",
+        "this channel is now public",
+        "channel converted to"
+    )
+
+    // Nhận diện thông báo hệ thống của Telegram để bỏ qua, tránh đăng nhầm
+    // mấy câu như "Channel created" hay "Messages in this channel will be
+    // automatically deleted after 1 month" lên Binance Square.
+    fun isTelegramServiceMessage(text: String): Boolean {
+        val normalized = text.trim().lowercase()
+        if (normalized.isEmpty()) return false
+        return SERVICE_MESSAGE_PATTERNS.any { normalized.contains(it) }
+    }
+
     // Chuyển 1 đoạn HTML nhỏ (thẻ <br>, <a>, <b>, <span>...) về text thuần,
     // dùng khi đọc nội dung bài viết từ trang t.me/s/<kenh>.
     fun htmlFragmentToPlainText(html: String): String {

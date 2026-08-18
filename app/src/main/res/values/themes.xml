@@ -1,5 +1,10 @@
 <resources>
-    <style name="Theme.SquareHub" parent="Theme.AppCompat.DayNight" />
+    <!-- Dùng nền sáng cố định (không DayNight) vì màu chữ/thẻ trong layout
+         đang đặt cứng theo tông sáng; tự vẽ thanh tiêu đề riêng nên tắt
+         ActionBar mặc định. -->
+    <style name="Theme.SquareHub" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="android:windowBackground">#FFFFFF</item>
+    </style>
 
     <style name="Theme.SquareHub.Dialog" parent="Theme.AppCompat.Light.NoActionBar">
         <item name="android:windowIsTranslucent">true</item>

@@ -65,7 +65,7 @@ class TelegramAutoPostWorker(
         private const val NOTIFICATION_ID = 9001
         private const val SNIPPET_LENGTH = 60
 
-        // Cờ input để chạy quét thủ công (nút "Quét ngay" trong TelegramActivity)
+        // Cờ input để chạy quét thủ công (nút "Quét ngay" ở tab Telegram)
         // - bỏ qua điều kiện "đã bật công tắc tổng", vì mục đích lúc đó là test
         // xem đọc kênh có ra bài không, không phải chạy như lịch nền thật.
         const val INPUT_FORCE = "force"
@@ -134,13 +134,25 @@ class TelegramAutoPostWorker(
             .timeout(20000)
             .get()
 
+        // Đếm tổng số khối tin nhắn đọc được trên trang (kể cả thông báo hệ
+        // thống), để phân biệt "kênh không đọc được gì" với "kênh chỉ toàn
+        // thông báo hệ thống, chưa có bài đăng thật".
+        val rawBlockCount = doc.select("div.tgme_widget_message[data-post]").size
+
         val messages = mutableListOf<Msg>()
-        for (div in doc.select("div.tgme_widget_message[data-post]")) {
+        // Bỏ qua thông báo hệ thống của Telegram (class service_message):
+        // "Channel created", "Messages in this channel will be automatically
+        // deleted after 1 month"... - đây không phải bài đăng của chủ kênh.
+        for (div in doc.select("div.tgme_widget_message[data-post]:not(.service_message)")) {
             val dataPost = div.attr("data-post")
             val postId = dataPost.substringAfterLast("/").toLongOrNull() ?: continue
 
             val rawHtml = div.selectFirst("div.tgme_widget_message_text")?.html() ?: ""
             val text = TextCleaner.htmlFragmentToPlainText(rawHtml)
+
+            // Chốt chặn thứ 2 theo nội dung, phòng khi Telegram đổi tên class
+            // hoặc thông báo hệ thống không mang class service_message.
+            if (TextCleaner.isTelegramServiceMessage(text)) continue
 
             val photoUrls = mutableListOf<String>()
             for (photoEl in div.select("a.tgme_widget_message_photo_wrap")) {
@@ -155,18 +167,22 @@ class TelegramAutoPostWorker(
             messages.add(Msg(postId, text, photoUrls, videoUrl))
         }
 
-        // Nếu không đọc được bài nào cả (khác 0 bài mới - đây là KHÔNG đọc
-        // được bài NÀO trên trang), rất có thể trang t.me/s/ đã đổi cấu trúc
-        // hoặc tên kênh sai/kênh riêng tư - báo rõ để dò lỗi, thay vì im lặng
-        // trông giống hệt "không có bài mới".
         if (messages.isEmpty()) {
+            // Đọc được khối tin nhắn nhưng toàn là thông báo hệ thống -> kênh
+            // đọc bình thường, chỉ là chưa có bài đăng thật nào. Không phải lỗi.
+            if (rawBlockCount > 0) return emptyList()
+
+            // Không đọc được khối tin nhắn NÀO trên trang: nhiều khả năng tên
+            // kênh sai, hoặc là nhóm/kênh riêng tư (Telegram không cho xem
+            // trước công khai) - báo rõ để dò lỗi, thay vì im lặng trông
+            // giống hệt "không có bài mới".
             return listOf(
                 TelegramScanLog.PostEntry(
                     channelUsername = channel.username,
                     success = false,
                     snippet = "",
                     message = "Không đọc được bài nào từ t.me/s/${channel.username} " +
-                        "(kênh phải là kênh CÔNG KHAI - private/nhóm riêng tư sẽ không đọc được; " +
+                        "(kênh phải là Channel CÔNG KHAI - nhóm/kênh riêng tư sẽ không đọc được; " +
                         "hoặc kiểm tra lại tên kênh có đúng không)"
                 )
             )
