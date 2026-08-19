@@ -4,17 +4,25 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
+import androidx.work.BackoffPolicy
+import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
+import java.io.IOException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
 // Bật/tắt và lên lịch việc kiểm tra kênh Telegram định kỳ (mỗi 15 phút, tối
@@ -22,21 +30,39 @@ import java.util.concurrent.TimeUnit
 // androidx.work tự đăng ký nhận sự kiện BOOT_COMPLETED (đã khai báo quyền
 // RECEIVE_BOOT_COMPLETED trong AndroidManifest).
 object TelegramScheduler {
-    private const val WORK_NAME = "telegram_auto_post_worker"
+    // Đổi tên công việc khi thay đổi ràng buộc/lịch: enqueueUniquePeriodicWork
+    // với KEEP sẽ GIỮ NGUYÊN lịch cũ đã đăng ký từ bản trước (không có ràng
+    // buộc mạng), nên nếu giữ tên cũ thì máy vẫn chạy theo lịch cũ và bản vá
+    // này vô tác dụng. Tên mới = lịch mới, đồng thời huỷ lịch cũ bên dưới.
+    private const val LEGACY_WORK_NAME = "telegram_auto_post_worker"
+    private const val WORK_NAME_V2 = "telegram_auto_post_worker_v2"
 
     fun schedule(context: Context) {
-        val request = PeriodicWorkRequestBuilder<TelegramAutoPostWorker>(15, TimeUnit.MINUTES).build()
-        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-            WORK_NAME,
-            // Nếu đã có lịch chạy rồi thì giữ nguyên, không tạo chồng lịch mới
-            // mỗi lần mở app lên.
-            ExistingPeriodicWorkPolicy.KEEP,
-            request
-        )
+        val manager = WorkManager.getInstance(context)
+
+        // Dọn lịch cũ (bản trước v10) để không chạy song song 2 lịch.
+        manager.cancelUniqueWork(LEGACY_WORK_NAME)
+
+        // Chỉ chạy khi máy THẬT SỰ có mạng. Trước đây thiếu ràng buộc này nên
+        // ban đêm máy ngủ sâu/ngắt mạng, tác vụ vẫn chạy rồi báo lỗi
+        // "Unable to resolve host t.me" hàng loạt. Có ràng buộc thì hệ thống
+        // sẽ tự hoãn lại tới khi có mạng mới chạy.
+        val constraints = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .build()
+
+        val request = PeriodicWorkRequestBuilder<TelegramAutoPostWorker>(15, TimeUnit.MINUTES)
+            .setConstraints(constraints)
+            .setBackoffCriteria(BackoffPolicy.LINEAR, 5, TimeUnit.MINUTES)
+            .build()
+
+        manager.enqueueUniquePeriodicWork(WORK_NAME_V2, ExistingPeriodicWorkPolicy.KEEP, request)
     }
 
     fun cancel(context: Context) {
-        WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
+        val manager = WorkManager.getInstance(context)
+        manager.cancelUniqueWork(WORK_NAME_V2)
+        manager.cancelUniqueWork(LEGACY_WORK_NAME)
     }
 }
 
@@ -74,38 +100,68 @@ class TelegramAutoPostWorker(
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val force = inputData.getBoolean(INPUT_FORCE, false)
         try {
-            runCheck(force)
+            if (runCheck(force)) Result.retry() else Result.success()
         } catch (e: Exception) {
-            // Không để 1 lỗi bất ngờ (mất mạng, kênh bị khoá...) làm hỏng cả
+            // Không để 1 lỗi bất ngờ (kênh bị khoá, dữ liệu lạ...) làm hỏng cả
             // lịch chạy định kỳ - lần kiểm tra kế tiếp (15') sẽ tự chạy lại.
+            Result.success()
         }
-        Result.success()
     }
 
-    private fun runCheck(force: Boolean) {
+    // Trả về true nếu lần quét này thất bại vì mất mạng và nên thử lại sớm
+    // (Result.retry) thay vì đợi hết 15 phút của chu kỳ kế tiếp.
+    private fun runCheck(force: Boolean): Boolean {
         val appContext = applicationContext
 
-        if (!force && !TelegramChannels.isMasterEnabled(appContext)) return
+        if (!force && !TelegramChannels.isMasterEnabled(appContext)) return false
 
         val prefs = appContext.getSharedPreferences(Config.PREFS_NAME, Context.MODE_PRIVATE)
         val apiKey = prefs.getString(Config.API_KEY_PREF, "") ?: ""
-        if (apiKey.isBlank()) return
+        if (apiKey.isBlank()) return false
 
         val channels = TelegramChannels.getChannels(appContext).filter { it.enabled }
-        if (channels.isEmpty()) return
+        if (channels.isEmpty()) return false
+
+        // Máy đang không có mạng: không quét, không ghi 1 đống dòng đỏ giống
+        // hệt nhau cho từng kênh. Chỉ ghi đúng 1 dòng cho cả lần quét rồi
+        // hẹn thử lại - hệ thống sẽ tự chạy lại khi có mạng.
+        if (!hasNetwork(appContext)) {
+            TelegramScanLog.recordScan(
+                appContext,
+                channels.size,
+                listOf(
+                    TelegramScanLog.PostEntry(
+                        channelUsername = "",
+                        success = false,
+                        snippet = "",
+                        message = "Máy đang không có mạng, bỏ qua lần quét này (sẽ tự thử lại khi có mạng)",
+                        isPostAttempt = false
+                    )
+                )
+            )
+            return true
+        }
 
         val allEntries = mutableListOf<TelegramScanLog.PostEntry>()
+        var networkFailures = 0
 
         for (channel in channels) {
             try {
                 allEntries.addAll(checkChannel(appContext, channel, apiKey))
             } catch (e: Exception) {
+                val networkProblem = isNetworkError(e)
+                if (networkProblem) networkFailures++
                 allEntries.add(
                     TelegramScanLog.PostEntry(
                         channelUsername = channel.username,
                         success = false,
                         snippet = "",
-                        message = "Lỗi kiểm tra kênh: ${e.message ?: e.javaClass.simpleName}"
+                        message = if (networkProblem) {
+                            "Không kết nối được tới Telegram (mạng chập chờn), sẽ thử lại lần sau"
+                        } else {
+                            "Lỗi kiểm tra kênh: ${e.message ?: e.javaClass.simpleName}"
+                        },
+                        isPostAttempt = false
                     )
                 )
             }
@@ -116,10 +172,57 @@ class TelegramAutoPostWorker(
         TelegramScanLog.recordScan(appContext, channels.size, allEntries)
 
         val postedCount = allEntries.count { it.success }
-        val errorCount = allEntries.count { !it.success }
-        if (postedCount > 0 || errorCount > 0) {
-            notifyResult(appContext, postedCount, errorCount)
+        // Chỉ báo thông báo khi có bài đăng được, hoặc khi bài đăng thất bại
+        // thật sự - lỗi mạng tạm thời thì im lặng, tránh làm phiền.
+        val postFailures = allEntries.count { !it.success && it.isPostAttempt }
+        if (postedCount > 0 || postFailures > 0) {
+            notifyResult(appContext, postedCount, postFailures)
         }
+
+        // Tất cả các kênh đều hỏng vì mạng -> coi như lần quét này chưa chạy
+        // được, hẹn thử lại sớm thay vì đợi hết chu kỳ.
+        return networkFailures > 0 && networkFailures == channels.size
+    }
+
+    // Máy có đường mạng dùng được hay không (WiFi/di động đang kết nối).
+    private fun hasNetwork(context: Context): Boolean {
+        return try {
+            val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return true
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val network = manager.activeNetwork ?: return false
+                val caps = manager.getNetworkCapabilities(network) ?: return false
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            } else {
+                @Suppress("DEPRECATION")
+                manager.activeNetworkInfo?.isConnected == true
+            }
+        } catch (e: Exception) {
+            // Không kiểm tra được thì cứ cho chạy, để lỗi thật (nếu có) tự lộ ra.
+            true
+        }
+    }
+
+    // Lỗi thuộc nhóm "mạng" (mất mạng, DNS không phân giải được, timeout)
+    // thay vì lỗi do kênh/nội dung.
+    private fun isNetworkError(e: Throwable): Boolean {
+        var cause: Throwable? = e
+        var depth = 0
+        while (cause != null && depth < 5) {
+            if (cause is UnknownHostException || cause is SocketTimeoutException) return true
+            if (cause is IOException) {
+                val message = cause.message?.lowercase() ?: ""
+                if (message.contains("unable to resolve host") ||
+                    message.contains("failed to connect") ||
+                    message.contains("network is unreachable") ||
+                    message.contains("timeout") ||
+                    message.contains("connection reset")
+                ) return true
+            }
+            cause = cause.cause
+            depth++
+        }
+        return false
     }
 
     // Trả về danh sách kết quả đăng bài (nếu có) cho riêng kênh này, để ghi

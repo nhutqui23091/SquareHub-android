@@ -21,7 +21,11 @@ object TelegramScanLog {
         val channelUsername: String,
         val success: Boolean,
         val snippet: String,
-        val message: String
+        val message: String,
+        // true  = 1 bài viết thật sự đã thử đăng lên Square (tính vào số "bài")
+        // false = dòng ghi chú/lỗi ở mức kênh hoặc mức cả lần quét (mất mạng,
+        //         tên kênh sai...), KHÔNG phải bài viết nên không tính là "bài"
+        val isPostAttempt: Boolean = true
     )
 
     data class ScanEntry(
@@ -48,6 +52,7 @@ object TelegramScanLog {
                     put("success", p.success)
                     put("snippet", p.snippet)
                     put("message", p.message)
+                    put("isPostAttempt", p.isPostAttempt)
                 }
             )
         }
@@ -93,7 +98,8 @@ object TelegramScanLog {
                         channelUsername = p.optString("channelUsername", ""),
                         success = p.optBoolean("success", false),
                         snippet = p.optString("snippet", ""),
-                        message = p.optString("message", "")
+                        message = p.optString("message", ""),
+                        isPostAttempt = p.optBoolean("isPostAttempt", true)
                     )
                 )
             }

@@ -339,11 +339,21 @@ class MainActivity : AppCompatActivity() {
 
         for (scan in scans) {
             val timeText = timeFormat.format(Date(scan.timestampMs))
-            val summary = if (scan.posts.isEmpty()) {
-                "$timeText – kiểm tra ${scan.channelsChecked} kênh, không có bài mới"
-            } else {
-                val successCount = scan.posts.count { it.success }
-                "$timeText – kiểm tra ${scan.channelsChecked} kênh, ${scan.posts.size} bài ($successCount thành công)"
+
+            // Chỉ đếm là "bài" khi thật sự có bài viết được xử lý; các dòng
+            // lỗi mức kênh/mạng chỉ đếm riêng là "lỗi", không gọi là bài.
+            val postEntries = scan.posts.filter { it.isPostAttempt }
+            val noteEntries = scan.posts.filter { !it.isPostAttempt }
+
+            val summary = buildString {
+                append("$timeText – kiểm tra ${scan.channelsChecked} kênh")
+                if (postEntries.isEmpty()) {
+                    append(", không có bài mới")
+                } else {
+                    val successCount = postEntries.count { it.success }
+                    append(", ${postEntries.size} bài ($successCount thành công)")
+                }
+                if (noteEntries.isNotEmpty()) append(", ${noteEntries.size} lỗi")
             }
 
             telegramScanLogContainer.addView(
@@ -356,12 +366,16 @@ class MainActivity : AppCompatActivity() {
             )
 
             for (post in scan.posts) {
-                val icon = if (post.success) "✅" else "❌"
-                val detail = if (post.success) {
-                    "$icon @${post.channelUsername}: ${post.snippet}"
-                } else {
-                    val base = post.snippet.ifBlank { "(không có nội dung)" }
-                    "$icon @${post.channelUsername}: $base — ${post.message}"
+                val who = if (post.channelUsername.isBlank()) "" else "@${post.channelUsername}: "
+                val detail = when {
+                    post.success -> "✅ $who${post.snippet}"
+                    // Dòng ghi chú/lỗi mức kênh: không có nội dung bài nào để
+                    // hiện, chỉ hiện đúng lý do cho gọn và dễ đọc.
+                    !post.isPostAttempt -> "⚠️ $who${post.message}"
+                    else -> {
+                        val base = post.snippet.ifBlank { "(không có nội dung)" }
+                        "❌ $who$base — ${post.message}"
+                    }
                 }
 
                 telegramScanLogContainer.addView(
@@ -369,7 +383,17 @@ class MainActivity : AppCompatActivity() {
                         text = detail
                         textSize = 12f
                         setPadding(16, 2, 0, 2)
-                        setTextColor(Color.parseColor(if (post.success) "#2E7D32" else "#C62828"))
+                        // Xanh = đăng thành công, cam = ghi chú/lỗi tạm thời
+                        // (mạng chập chờn), đỏ = đăng bài thất bại thật sự.
+                        setTextColor(
+                            Color.parseColor(
+                                when {
+                                    post.success -> "#2E7D32"
+                                    !post.isPostAttempt -> "#E08600"
+                                    else -> "#C62828"
+                                }
+                            )
+                        )
                     }
                 )
             }
